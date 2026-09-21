@@ -1,0 +1,90 @@
+from collections.abc import Mapping, Sequence
+from enum import StrEnum
+
+from backend.config import Settings, get_settings
+from backend.models.car import BodyType, Car, PriceRanges
+from backend.models.listing import CarListing, ClassifiedListing, CompetitorGroups
+
+
+class CompetitorCategory(StrEnum):
+    DIRECT = "direct"
+    EXPENSIVE = "expensive"
+    CHEAPER = "cheaper"
+
+
+DEFAULT_BODY_COMPATIBILITY: Mapping[BodyType, frozenset[BodyType]] = {
+    BodyType.SEDAN: frozenset({BodyType.SEDAN, BodyType.LIFTBACK}),
+    BodyType.WAGON: frozenset({BodyType.WAGON}),
+    BodyType.HATCHBACK: frozenset({BodyType.HATCHBACK, BodyType.LIFTBACK}),
+    BodyType.LIFTBACK: frozenset({BodyType.LIFTBACK, BodyType.SEDAN, BodyType.HATCHBACK}),
+    BodyType.COUPE: frozenset({BodyType.COUPE}),
+    BodyType.CONVERTIBLE: frozenset({BodyType.CONVERTIBLE}),
+    BodyType.SUV: frozenset({BodyType.SUV, BodyType.CROSSOVER}),
+    BodyType.CROSSOVER: frozenset({BodyType.CROSSOVER, BodyType.SUV}),
+    BodyType.PICKUP: frozenset({BodyType.PICKUP}),
+    BodyType.MINIVAN: frozenset({BodyType.MINIVAN}),
+    BodyType.VAN: frozenset({BodyType.VAN}),
+}
+
+
+class CompetitorEngine:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        body_compatibility: Mapping[BodyType, frozenset[BodyType]] | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.body_compatibility = body_compatibility or DEFAULT_BODY_COMPATIBILITY
+
+    def calculate_price_ranges(self, price: int) -> PriceRanges:
+        if price <= 0:
+            raise ValueError("Price must be positive")
+        direct = self.settings.direct_price_percent
+        return PriceRanges(
+            direct_min=round(price * (1 - direct)),
+            direct_max=round(price * (1 + direct)),
+            expensive_min=round(price * (1 + direct)) + 1,
+            expensive_max=round(price * (1 + self.settings.expensive_max_percent)),
+            cheaper_min=round(price * (1 - self.settings.cheaper_max_percent)),
+            cheaper_max=round(price * (1 - self.settings.cheaper_min_percent)),
+        )
+
+    def body_is_compatible(self, source: BodyType, candidate: BodyType) -> bool:
+        return candidate in self.body_compatibility.get(source, frozenset({source}))
+
+    @staticmethod
+    def segment_is_compatible(source: str | None, candidate: str | None) -> bool:
+        return (
+            source is None
+            or candidate is None
+            or source.strip().casefold() == candidate.strip().casefold()
+        )
+
+    def classify_price(self, source_price: int, candidate_price: int) -> CompetitorCategory | None:
+        ranges = self.calculate_price_ranges(source_price)
+        if ranges.direct_min <= candidate_price <= ranges.direct_max:
+            return CompetitorCategory.DIRECT
+        if ranges.expensive_min <= candidate_price <= ranges.expensive_max:
+            return CompetitorCategory.EXPENSIVE
+        if ranges.cheaper_min <= candidate_price <= ranges.cheaper_max:
+            return CompetitorCategory.CHEAPER
+        return None
+
+    def classify(self, source: Car, listings: Sequence[CarListing]) -> CompetitorGroups:
+        groups = CompetitorGroups()
+        for listing in listings:
+            if not self.body_is_compatible(
+                source.body_type, listing.body_type
+            ) or not self.segment_is_compatible(source.segment, listing.segment):
+                continue
+            category = self.classify_price(source.price, listing.price)
+            if category is None:
+                continue
+            difference = listing.price - source.price
+            item = ClassifiedListing(
+                listing=listing,
+                price_difference=difference,
+                price_difference_percent=round(difference / source.price * 100, 2),
+            )
+            getattr(groups, category.value).append(item)
+        return groups

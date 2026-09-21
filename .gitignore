@@ -1,0 +1,14 @@
+.env
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+data/.pytest-tmp/
+.ruff_cache/
+data/*.db
+data/*.db-*
+logs/*.log
+frontend/node_modules/
+frontend/dist/
