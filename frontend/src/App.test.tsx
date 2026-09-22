@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -50,6 +50,8 @@ function response(data: unknown, ok = true) {
   return Promise.resolve({ ok, status: ok ? 200 : 500, json: async () => data });
 }
 
+let generationResponse: { status: string; generations: { id: string; label: string; name: string }[] };
+
 function installFetch(searchResult: unknown = result) {
   return vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     const url = String(input);
@@ -59,10 +61,7 @@ function installFetch(searchResult: unknown = result) {
       { value: "tatarstan", label: "Республика Татарстан" },
     ] }) as never;
     if (url.includes("/catalog/models")) return response(["Fiesta", "Focus"]) as never;
-    if (url.includes("/catalog/generations")) return response([
-      { id: "g1", label: "6 поколение", name: "6 поколение" },
-      { id: "g2", label: "7 поколение", name: "7 поколение" },
-    ]) as never;
+    if (url.includes("/catalog/generation-state")) return response(generationResponse) as never;
     if (url.includes("/catalog/engines")) return response([
       { id: "engine:one", label: "1.6 л · бензин · 105 л.с.", name: "engine" },
     ]) as never;
@@ -71,21 +70,50 @@ function installFetch(searchResult: unknown = result) {
   });
 }
 
-beforeEach(() => installFetch());
-afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  generationResponse = { status: "ready", generations: [
+    { id: "g1", label: "6 поколение", name: "6 поколение" },
+    { id: "g2", label: "7 поколение", name: "7 поколение" },
+  ] };
+  installFetch();
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("CarAnalyzer form", () => {
+  it("shows an explicit no-generation status without selecting an option", async () => {
+    generationResponse = { status: "source_has_no_generation_data", generations: [] };
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
+    await waitFor(() => expect(screen.getByText("Источник подтвердил отсутствие данных о поколениях")).toBeInTheDocument());
+    expect(screen.getByLabelText("Поколение")).toBeDisabled();
+  });
+
+  it("does not autoselect a generation from a parse error response", async () => {
+    generationResponse = { status: "parse_error", generations: [
+      { id: "g1", label: "6 поколение", name: "6 поколение" },
+    ] };
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
+    await waitFor(() => expect(screen.getByText("Формат данных о поколениях пока не распознан")).toBeInTheDocument());
+    expect(screen.getByLabelText("Поколение")).toHaveValue("");
+  });
+
   it("has dependent brand/model controls and explicit ANY filters", async () => {
     render(<App />);
     const [brand, model] = screen.getAllByRole("combobox");
     expect(model).toBeDisabled();
     fireEvent.change(brand, { target: { value: "Ford" } });
     expect(model).not.toBeDisabled();
+    fireEvent.focus(model);
     await waitFor(() => expect(screen.getByRole("option", { name: "Fiesta" })).toBeInTheDocument());
     expect(screen.getByRole("option", { name: "Любой кузов" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Любая" })).toBeInTheDocument();
     expect(screen.getByText("Точный год")).toBeInTheDocument();
-    expect(screen.getByText("Диапазон")).toBeInTheDocument();
+    expect(screen.getAllByText("Диапазон")).toHaveLength(2);
   });
 
   it("resets generation and engine when model/year/generation dependencies change", async () => {
@@ -94,9 +122,12 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(brand, { target: { value: "Ford" } });
     fireEvent.change(model, { target: { value: "Fiesta" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
-    await waitFor(() => expect(screen.getByRole("option", { name: "6 поколение" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Поколения загружены")).toBeInTheDocument());
     const generation = screen.getByLabelText("Поколение");
-    fireEvent.change(generation, { target: { value: "g1" } });
+    fireEvent.focus(generation);
+    await waitFor(() => expect(screen.getByRole("option", { name: "6 поколение" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("option", { name: "6 поколение" }));
+    fireEvent.focus(screen.getByLabelText("Двигатель"));
     await waitFor(() => expect(screen.getByRole("option", { name: /1.6 л/ })).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Focus" } });
     expect(screen.getByLabelText("Поколение")).toHaveValue("");
@@ -111,7 +142,9 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
     fireEvent.change(screen.getByLabelText("Коробка"), { target: { value: "any" } });
-    fireEvent.change(screen.getByLabelText("Регион поиска"), { target: { value: "tatarstan" } });
+    fireEvent.focus(screen.getByLabelText("Регион поиска"));
+    await waitFor(() => expect(screen.getByRole("option", { name: "Республика Татарстан" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("option", { name: "Республика Татарстан" }));
     fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
     fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
     await waitFor(() => expect(screen.getByText("Рынок исходной модели")).toBeInTheDocument());
@@ -136,7 +169,7 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
     fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
     fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
-    await waitFor(() => expect(screen.getByText(/рынок — работает · 1/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText(/рынок — работает · 1/)).toHaveLength(2));
     expect(screen.getByText(/конкуренты — превышен лимит времени · 0/)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Открыть/ });
     expect(link).toHaveAttribute("href", result.source_listings.listings[0].listing.url);

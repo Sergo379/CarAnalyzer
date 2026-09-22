@@ -11,6 +11,10 @@ data/*.db
 data/*.db-*
 data/vehicle_catalog_runtime.json
 data/vehicle_catalog_runtime.*.tmp
+data/.vehicle_catalog_runtime.json.*.tmp
+data/vehicle_catalog_runtime.lock
+data/*.lock
+data/catalog_audit_report.json
 data/browser/
 logs/*.log
 frontend/node_modules/

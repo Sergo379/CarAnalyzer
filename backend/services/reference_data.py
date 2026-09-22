@@ -12,7 +12,6 @@ def _read_json(name: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@lru_cache
 def vehicle_catalog() -> dict[str, Any]:
     from backend.services.marketplace_catalog import CatalogCache
 

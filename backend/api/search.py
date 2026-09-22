@@ -50,11 +50,12 @@ def _year_window(year: int | None, year_from: int | None, year_to: int | None) -
     return year_from, year_to
 
 
-async def _enrich_window(cache: CatalogCache, brand: str, model: str, start: int, end: int) -> None:
+async def _enrich_window(cache: CatalogCache, brand: str, model: str, start: int, end: int) -> str:
     try:
         state = await CatalogEnrichmentService(cache).ensure_window(brand, model, start, end)
-        if state not in {"fresh", "cached"}:
+        if state not in {"fresh", "cached", "complete", "source_has_no_generation_data"}:
             logger.warning("catalog enrichment state=%s brand=%s model=%s", state, brand, model)
+        return state
     except Exception as exc:
         logger.warning(
             "catalog enrichment state=source_unavailable brand=%s model=%s error_type=%s",
@@ -62,6 +63,22 @@ async def _enrich_window(cache: CatalogCache, brand: str, model: str, start: int
             model,
             type(exc).__name__,
         )
+        return "source_unavailable"
+
+
+def _generation_options(
+    cache: CatalogCache, brand: str, model: str, start: int, end: int
+) -> list[dict[str, object]]:
+    return [
+        {
+            "id": item["id"],
+            "label": item["name"],
+            "name": item["name"],
+            "year_from": item.get("year_from"),
+            "year_to": item.get("year_to"),
+        }
+        for item in cache.generations(brand, model, year_from=start, year_to=end)
+    ]
 
 
 @router.get("/catalog/generations")
@@ -75,16 +92,25 @@ async def catalog_generations(
     cache = CatalogCache()
     start, end = _year_window(year, year_from, year_to)
     await _enrich_window(cache, brand, model, start, end)
-    return [
-        {
-            "id": item["id"],
-            "label": item["name"],
-            "name": item["name"],
-            "year_from": item.get("year_from"),
-            "year_to": item.get("year_to"),
-        }
-        for item in cache.generations(brand, model, year_from=start, year_to=end)
-    ]
+    return _generation_options(cache, brand, model, start, end)
+
+
+@router.get("/catalog/generation-state")
+async def catalog_generation_state(
+    brand: str,
+    model: str,
+    year: int | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> dict[str, object]:
+    cache = CatalogCache()
+    start, end = _year_window(year, year_from, year_to)
+    state = await _enrich_window(cache, brand, model, start, end)
+    options = _generation_options(cache, brand, model, start, end)
+    return {
+        "status": "ready" if state in {"complete", "fresh", "cached"} else state,
+        "generations": options,
+    }
 
 
 @router.get("/catalog/engines")

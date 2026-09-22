@@ -32,7 +32,7 @@ class CarListing(BaseModel):
     engine_code: str | None = Field(default=None, max_length=80)
     drivetrain: str | None = Field(default=None, max_length=40)
     year: int = Field(ge=1886, le=2100)
-    body_type: BodyType
+    body_type: BodyType | None = None
     transmission: Transmission | None = None
     price: int = Field(gt=0)
     url: HttpUrl
@@ -77,6 +77,9 @@ class SourceDiagnostics(BaseModel):
     accepted_count: int = Field(default=0, ge=0)
     detail_requests: int = Field(default=0, ge=0)
     browser_fallbacks: int = Field(default=0, ge=0)
+    http_requests: int = Field(default=0, ge=0)
+    routes_attempted: int = Field(default=0, ge=0)
+    partial_failures: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
     rejected: dict[str, int] = Field(default_factory=dict)
     resolved_url: str | None = None

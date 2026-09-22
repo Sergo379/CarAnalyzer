@@ -90,6 +90,14 @@ const sourceLabels: Record<string, string> = {
   "drom.ru": "Drom",
 };
 
+const generationMessages: Record<string, string> = {
+  loading: "Загружаем поколения…",
+  source_has_no_generation_data: "Источник подтвердил отсутствие данных о поколениях",
+  source_unavailable: "Источник каталога недоступен",
+  rate_limited: "Источник ограничил запросы; попробуйте позже",
+  parse_error: "Формат данных о поколениях пока не распознан",
+};
+
 const rubles = new Intl.NumberFormat("ru-RU", {
   style: "currency",
   currency: "RUB",
@@ -110,7 +118,7 @@ function ListingRow({ item }: { item: ClassifiedListing }) {
         <span className="muted">{item.listing.location ?? "Регион не указан"}</span>
       </td>
       <td>{item.listing.year}</td>
-      <td>{bodyLabels[item.listing.body_type]}</td>
+      <td>{item.listing.body_type ? bodyLabels[item.listing.body_type] : "Кузов не определён"}</td>
       <td>{item.listing.transmission ? transmissionLabels[item.listing.transmission] : "—"}</td>
       <td className="price">{rubles.format(item.listing.price)}</td>
       <td className={differenceClass}>
@@ -167,6 +175,7 @@ export default function App() {
   const [brands, setBrands] = useState<string[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [generations, setGenerations] = useState<CatalogOption[]>([]);
+  const [generationState, setGenerationState] = useState("idle");
   const [engines, setEngines] = useState<CatalogOption[]>([]);
   const [regions, setRegions] = useState<SelectOption[]>(fallbackRegions);
   const yearReady = form.year_mode === "exact"
@@ -209,7 +218,9 @@ export default function App() {
   useEffect(() => {
     setGenerations([]);
     setEngines([]);
+    setGenerationState("idle");
     if (!form.brand.trim() || !form.model.trim() || !yearReady) return;
+    setGenerationState("loading");
     const controller = new AbortController();
     const params = new URLSearchParams({ brand: form.brand, model: form.model });
     if (form.year_mode === "exact") params.set("year", String(form.year));
@@ -217,21 +228,30 @@ export default function App() {
       params.set("year_from", String(form.year_from));
       params.set("year_to", String(form.year_to));
     }
-    fetch(`/api/catalog/generations?${params}`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : [])
-      .then((items: CatalogOption[]) => {
-        setGenerations(items);
-        if (items.length === 1) {
-          setForm((current) => ({ ...current, generation_id: items[0].id }));
+    fetch(`/api/catalog/generation-state?${params}`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<{ status: string; generations: CatalogOption[] }>;
+      })
+      .then((data) => {
+        setGenerations(data.generations);
+        setGenerationState(data.status);
+        if (data.status === "ready" && data.generations.length === 1) {
+          setForm((current) => ({ ...current, generation_id: data.generations[0].id }));
         }
       })
-      .catch(() => setGenerations([]));
+      .catch((reason: unknown) => {
+        if (!(reason instanceof DOMException && reason.name === "AbortError")) {
+          setGenerations([]);
+          setGenerationState("source_unavailable");
+        }
+      });
     return () => controller.abort();
   }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, yearReady]);
 
   useEffect(() => {
     setEngines([]);
-    if (!form.brand.trim() || !form.model.trim() || !yearReady) return;
+    if (!form.brand.trim() || !form.model.trim() || !yearReady || generationState !== "ready") return;
     const controller = new AbortController();
     const params = new URLSearchParams({ brand: form.brand, model: form.model });
     if (form.year_mode === "exact") params.set("year", String(form.year));
@@ -245,7 +265,7 @@ export default function App() {
       .then((items: CatalogOption[]) => setEngines(items))
       .catch(() => setEngines([]));
     return () => controller.abort();
-  }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, form.generation_id, yearReady]);
+  }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, form.generation_id, yearReady, generationState]);
 
   const brandOptions = useMemo(
     () => brands.map((brand) => ({ value: brand, label: brand })),
@@ -338,7 +358,10 @@ export default function App() {
             </div>
           )}
         </div>
-        <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady} placeholder={form.year_mode === "range" ? "Все поколения в диапазоне" : "Любое поколение"} value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
+        <div>
+          <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady || generationState !== "ready"} placeholder={form.year_mode === "range" ? "Все поколения в диапазоне" : "Любое поколение"} value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
+          <small aria-live="polite">{generationState === "ready" ? (generations.length ? "Поколения загружены" : "Для выбранного года поколений нет") : generationMessages[generationState] ?? ""}</small>
+        </div>
         <SearchableSelect label="Двигатель" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady} placeholder="Любой двигатель" value={form.modification_id} options={engineOptions} onChange={(modification_id) => setForm({ ...form, modification_id })} />
         <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyFilter | "" })}><option value="" disabled>Выбрать кузов</option>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
         <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission | "" })}><option value="" disabled>Тип коробки</option>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>

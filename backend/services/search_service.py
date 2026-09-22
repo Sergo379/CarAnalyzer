@@ -159,16 +159,11 @@ class SearchService:
             raise InvalidSearchSelection(
                 "Selected engine does not belong to this model/generation/year range"
             )
-        modification = (
-            str(selected_engine["label"])
-            if selected_engine
-            else request.modification
-            or (
-                request.model
-                if re.fullmatch(r"[1-9]\d{2}[a-z]*", request.model.casefold())
-                and not identity.provisional
-                else None
-            )
+        modification = request.modification or (
+            request.model
+            if re.fullmatch(r"[1-9]\d{2}[a-z]*", request.model.casefold())
+            and not identity.provisional
+            else None
         )
         normalized = SearchRequest(
             brand=identity.brand,
@@ -491,10 +486,10 @@ class SearchService:
                     diagnostic.elapsed_seconds = time.perf_counter() - operation_started
 
         tasks = {
-            "discovered": asyncio.create_task(measured("competitors", scraper.discover(discovery))),
             "source_listings": asyncio.create_task(
                 measured("target", scraper.search(source_query))
             ),
+            "discovered": asyncio.create_task(measured("competitors", scraper.discover(discovery))),
         }
         done, pending = await asyncio.wait(
             tasks.values(), timeout=self._settings().source_search_timeout_seconds
@@ -565,7 +560,9 @@ class SearchService:
             return "year"
         if not self._target_price_matches(listing.price, query):
             return "price"
-        if query.body_type != BodyFilter.ANY and listing.body_type.value != query.body_type.value:
+        if query.body_type != BodyFilter.ANY and (
+            listing.body_type is None or listing.body_type.value != query.body_type.value
+        ):
             return "body"
         if query.transmission != Transmission.ANY and listing.transmission != query.transmission:
             return "transmission"
@@ -575,12 +572,20 @@ class SearchService:
             ) is True and listing.raw_metadata.get("region_scope") == region_value(query.region)
             if not guaranteed:
                 return "region"
-        if (
-            query.generation_id
-            and listing.canonical_generation_id
-            and listing.canonical_generation_id != query.generation_id
-        ):
-            return "generation"
+        if query.generation_id and listing.canonical_generation_id != query.generation_id:
+            candidate_generations = self.marketplace_catalog.generations(
+                query.brand, query.model, listing.year
+            )
+            guaranteed = (
+                listing.raw_metadata.get("generation_filter_guaranteed") is True
+                and listing.raw_metadata.get("generation_id") == query.generation_id
+            )
+            year_unambiguous = (
+                len(candidate_generations) == 1
+                and candidate_generations[0]["id"] == query.generation_id
+            )
+            if not guaranteed and not year_unambiguous:
+                return "generation"
         if query.modification_id and not self._engine_matches_listing(listing, query):
             return "engine"
         return None

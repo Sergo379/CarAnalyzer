@@ -56,6 +56,13 @@ class Settings(BaseSettings):
             else PROJECT_ROOT / self.database_path
         )
 
+    def resolved_catalog_runtime_path(self) -> Path:
+        return (
+            self.catalog_runtime_path
+            if self.catalog_runtime_path.is_absolute()
+            else PROJECT_ROOT / self.catalog_runtime_path
+        )
+
     def resolved_avito_browser_data_path(self) -> Path:
         return (
             self.avito_browser_data_path

@@ -7,9 +7,12 @@ import json
 import os
 import re
 import tempfile
+import time
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
@@ -17,6 +20,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from backend.config import get_settings
 from backend.models.car import BodyType
 from backend.models.catalog import (
     CanonicalVehicleIdentity,
@@ -37,7 +41,39 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
 DETAIL_TTL = timedelta(days=90)
+CATALOG_PARSER_VERSION = 3
 _CATALOG_WRITE_LOCK = asyncio.Lock()
+_MODEL_ENRICH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+@contextmanager
+def _catalog_file_lock(target: Path):
+    """Serialize read/merge/write across app and CLI processes."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_suffix(".lock")
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(slots=True)
@@ -276,7 +312,9 @@ class CatalogCache:
     # immutable tracked seed and writes enrichment only to the ignored runtime cache.
     path: Path | None = None
     seed_path: Path = CATALOG_SEED_PATH
-    runtime_path: Path = CATALOG_RUNTIME_PATH
+    runtime_path: Path = field(
+        default_factory=lambda: get_settings().resolved_catalog_runtime_path()
+    )
     _payload: dict[str, object] | None = field(default=None, init=False)
     _mtime_ns: int | None = field(default=None, init=False)
     _loaded_path: Path | None = field(default=None, init=False)
@@ -596,7 +634,17 @@ class CatalogCache:
                 temporary.write("\n")
                 temporary.flush()
                 os.fsync(temporary.fileno())
-            os.replace(temporary_path, target)
+            # Windows readers can briefly prevent replacement even though the
+            # writer lock serializes all catalog writers. Keep the fully written
+            # temp file and retry only this local atomic step, never the fetch.
+            for attempt in range(6):
+                try:
+                    os.replace(temporary_path, target)
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.05 * 2**attempt)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
@@ -607,16 +655,110 @@ class CatalogCache:
     def save_model_details(
         self, brand: str, model: str, generations: list[VehicleGeneration]
     ) -> None:
+        self._save_model_observation(brand, model, "complete", generations)
+
+    @staticmethod
+    def _merge_generation(current: dict, incoming: dict) -> dict:
+        def refs(values: list[dict], additions: list[dict]) -> list[dict]:
+            unique = {(str(value.get("source")), str(value.get("path"))): value for value in values}
+            unique.update(
+                {(str(value.get("source")), str(value.get("path"))): value for value in additions}
+            )
+            return list(unique.values())
+
+        firsts = [x for x in (current.get("year_from"), incoming.get("year_from")) if x is not None]
+        # A known open end remains open; an unknown end also remains unknown.
+        ends = (current.get("year_to"), incoming.get("year_to"))
+        current["year_from"] = min(firsts) if firsts else None
+        current["year_to"] = None if None in ends else max(ends)
+        current["body_types"] = sorted(
+            set(current.get("body_types", [])) | set(incoming.get("body_types", []))
+        )
+        current["source_refs"] = refs(
+            current.get("source_refs", []), incoming.get("source_refs", [])
+        )
+        by_id = {item["id"]: item for item in current.get("modifications", [])}
+        for item in incoming.get("modifications", []):
+            existing = by_id.get(item["id"])
+            if existing is None:
+                by_id[item["id"]] = item
+            else:
+                existing["source_refs"] = refs(
+                    existing.get("source_refs", []), item.get("source_refs", [])
+                )
+        current["modifications"] = list(by_id.values())
+        return current
+
+    def _save_model_observation(
+        self,
+        brand: str,
+        model: str,
+        status: str,
+        generations: list[VehicleGeneration] | None = None,
+        error_type: str | None = None,
+        error_detail: str | None = None,
+        replace_source: str | None = None,
+    ) -> None:
         payload = self.load()
         entry = self.model_entry(brand, model)
         if entry is None:
             return
-        existing = {generation["id"]: generation for generation in entry.get("generations", [])}
-        for generation in generations:
-            existing[generation.id] = generation.model_dump(mode="json")
+        existing = {
+            generation["id"]: generation
+            for generation in entry.get("generations", [])
+            if not (
+                replace_source
+                and generation.get("source_refs")
+                and all(ref.get("source") == replace_source for ref in generation["source_refs"])
+            )
+        }
+        for generation in generations or []:
+            incoming = generation.model_dump(mode="json")
+            if generation.id in existing:
+                self._merge_generation(existing[generation.id], incoming)
+            else:
+                existing[generation.id] = incoming
         entry["generations"] = list(existing.values())
-        entry["details_updated_at"] = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
+        entry["details_status"] = status
+        entry["details_checked_at"] = now.isoformat()
+        entry["details_parser_version"] = CATALOG_PARSER_VERSION
+        entry["details_error_type"] = error_type
+        entry["details_error_detail"] = error_detail
+        ttl = {
+            "complete": DETAIL_TTL,
+            "source_has_no_generation_data": timedelta(days=30),
+            "parse_error": timedelta(hours=12),
+            "source_unavailable": timedelta(days=1),
+            "rate_limited": timedelta(hours=2),
+        }.get(status, timedelta(hours=1))
+        if status == "rate_limited" and error_detail:
+            try:
+                ttl = timedelta(seconds=max(1, int(error_detail)))
+            except ValueError:
+                with suppress(TypeError, ValueError):
+                    ttl = max(timedelta(seconds=1), parsedate_to_datetime(error_detail) - now)
+        entry["details_retry_at"] = (now + ttl).isoformat()
+        if status == "complete":
+            entry["details_updated_at"] = now.isoformat()
         self.save(payload)
+
+    async def merge_model_observation(
+        self,
+        brand: str,
+        model: str,
+        status: str,
+        generations: list[VehicleGeneration] | None = None,
+        error_type: str | None = None,
+        error_detail: str | None = None,
+        replace_source: str | None = None,
+    ) -> None:
+        async with _CATALOG_WRITE_LOCK:
+            with _catalog_file_lock(self.write_path()):
+                self._payload = None
+                self._save_model_observation(
+                    brand, model, status, generations, error_type, error_detail, replace_source
+                )
 
     async def merge_source_mapping(
         self,
@@ -627,29 +769,31 @@ class CatalogCache:
         model_ref: SourceReference,
     ) -> None:
         async with _CATALOG_WRITE_LOCK:
-            self._payload = None
-            payload = self.load()
-            brand_entry = self._brand_entry(brand)
-            model_entry = self.model_entry(brand, model)
-            if brand_entry is None or model_entry is None:
-                return
+            with _catalog_file_lock(self.write_path()):
+                self._payload = None
+                payload = self.load()
+                brand_entry = self._brand_entry(brand)
+                model_entry = self.model_entry(brand, model)
+                if brand_entry is None or model_entry is None:
+                    return
 
-            def add_ref(entry: dict[str, object], ref: SourceReference) -> None:
-                refs = list(entry.get("source_refs", []))
-                serialized = ref.model_dump(mode="json")
-                refs = [
-                    value
-                    for value in refs
-                    if not (
-                        value.get("source") == source and value.get("path") == serialized["path"]
-                    )
-                ]
-                refs.append(serialized)
-                entry["source_refs"] = refs
+                def add_ref(entry: dict[str, object], ref: SourceReference) -> None:
+                    refs = list(entry.get("source_refs", []))
+                    serialized = ref.model_dump(mode="json")
+                    refs = [
+                        value
+                        for value in refs
+                        if not (
+                            value.get("source") == source
+                            and value.get("path") == serialized["path"]
+                        )
+                    ]
+                    refs.append(serialized)
+                    entry["source_refs"] = refs
 
-            add_ref(brand_entry, brand_ref)
-            add_ref(model_entry, model_ref)
-            self.save(payload)
+                add_ref(brand_entry, brand_ref)
+                add_ref(model_entry, model_ref)
+                self.save(payload)
 
     def details_are_fresh(self, brand: str, model: str, year: int) -> bool:
         entry = self.model_entry(brand, model)
@@ -660,10 +804,22 @@ class CatalogCache:
 
     def details_are_fresh_window(self, brand: str, model: str, start: int, end: int) -> bool:
         entry = self.model_entry(brand, model)
-        raw = entry.get("details_updated_at") if entry else None
-        if not raw or datetime.now(UTC) - datetime.fromisoformat(str(raw)) > DETAIL_TTL:
+        if not entry:
             return False
-        return bool(self.generations(brand, model, year_from=start, year_to=end))
+        # Legacy snapshots have a timestamp but no observation state. They
+        # must be checked once before being eligible for a validated audit.
+        if entry.get("details_status") in (None, "not_checked"):
+            return False
+        if (
+            entry.get("details_status") in ("complete", "source_has_no_generation_data")
+            and entry.get("details_parser_version") != CATALOG_PARSER_VERSION
+        ):
+            return False
+        retry_at = entry.get("details_retry_at")
+        if retry_at:
+            return datetime.now(UTC) < datetime.fromisoformat(str(retry_at))
+        raw = entry.get("details_updated_at")
+        return bool(raw and datetime.now(UTC) - datetime.fromisoformat(str(raw)) <= DETAIL_TTL)
 
     def _brand_entry(self, brand: str) -> dict[str, object] | None:
         needle = _key(_brand_name(brand))
@@ -736,8 +892,10 @@ class CatalogSyncService:
             "brands": [brand.model_dump(mode="json") for brand in brands],
         }
         async with _CATALOG_WRITE_LOCK:
-            payload = self._merge_payload(deepcopy(self.cache.load()), update)
-            self.cache.save(payload)
+            with _catalog_file_lock(self.cache.write_path()):
+                self.cache._payload = None
+                payload = self._merge_payload(deepcopy(self.cache.load()), update)
+                self.cache.save(payload)
         return self.cache.status()
 
     @staticmethod
@@ -796,37 +954,217 @@ class CatalogEnrichmentService:
         await self.ensure_window(brand, model, year, year)
 
     async def ensure_window(self, brand: str, model: str, start: int, end: int) -> str:
-        if self.cache.details_are_fresh_window(brand, model, start, end):
-            return "cached"
-        async with _CATALOG_WRITE_LOCK:
-            # Recheck after waiting: another endpoint may already have enriched it.
+        del start, end  # A model page is fresh independently of the selected year.
+        entry = self.cache.model_entry(brand, model)
+        if entry is None:
+            return "source_unavailable"
+        if self.cache.details_are_fresh_window(brand, model, 0, 0):
+            return str(
+                entry.get(
+                    "details_status", "complete" if entry.get("generations") else "not_checked"
+                )
+            )
+        lock = _MODEL_ENRICH_LOCKS.setdefault(f"{brand}|{model}", asyncio.Lock())
+        async with lock:
             self.cache._payload = None
-            if self.cache.details_are_fresh_window(brand, model, start, end):
-                return "cached"
-            ref = self.cache.source_model_ref("drom.ru", brand, model)
-            if ref is None:
-                return "source_unavailable"
-            url = ref.url.rstrip("/") + "/"
+            if self.cache.details_are_fresh_window(brand, model, 0, 0):
+                refreshed = self.cache.model_entry(brand, model)
+                return (
+                    str(refreshed.get("details_status", "complete"))
+                    if refreshed
+                    else "source_unavailable"
+                )
             async with httpx.AsyncClient(
                 headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=30
             ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-            generations = self.parse_drom_year(
-                response.content, brand, model, round((start + end) / 2), url
+                return await self.enrich_model(brand, model, client)
+
+    async def enrich_model(
+        self,
+        brand: str,
+        model: str,
+        client: httpx.AsyncClient,
+        *,
+        retry_failed: bool = False,
+    ) -> str:
+        entry = self.cache.model_entry(brand, model)
+        if entry is None:
+            return "source_unavailable"
+        if not retry_failed and self.cache.details_are_fresh_window(brand, model, 0, 0):
+            return str(
+                entry.get(
+                    "details_status", "complete" if entry.get("generations") else "not_checked"
+                )
             )
-            if generations:
-                self.cache._payload = None
-                self.cache.save_model_details(brand, model, generations)
-                return "fresh"
-            return "parse_error"
+        ref = self.cache.source_model_ref("drom.ru", brand, model)
+        if ref is None:
+            await self.cache.merge_model_observation(
+                brand, model, "source_unavailable", error_type="missing_drom_ref"
+            )
+            return "source_unavailable"
+        url = ref.url.rstrip("/") + "/"
+        try:
+            response = await client.get(url)
+            if response.status_code == 429:
+                await self.cache.merge_model_observation(
+                    brand,
+                    model,
+                    "rate_limited",
+                    error_type="HTTP_429",
+                    error_detail=response.headers.get("Retry-After"),
+                )
+                return "rate_limited"
+            if response.status_code in (403, 503):
+                await self.cache.merge_model_observation(
+                    brand, model, "source_unavailable", error_type=f"HTTP_{response.status_code}"
+                )
+                return "source_unavailable"
+            response.raise_for_status()
+            generations = self.parse_drom_year(response.content, brand, model, 0, url)
+            marker = self._has_generation_marker(response.content)
+            if not generations:
+                state = "parse_error" if marker else "source_has_no_generation_data"
+                await self.cache.merge_model_observation(brand, model, state)
+                return state
+            # Current Drom markup keeps modifications on each generation page.
+            # Fetch each unique generation URL once, with the same shared client.
+            generation_urls: dict[str, list[VehicleGeneration]] = {}
+            for generation in generations:
+                for generation_ref in generation.source_refs:
+                    generation_urls.setdefault(generation_ref.url, []).append(generation)
+            for generation_url, targets in generation_urls.items():
+                if any(item.modifications for item in targets):
+                    continue
+                detail = await client.get(generation_url)
+                if detail.status_code == 429:
+                    await self.cache.merge_model_observation(
+                        brand,
+                        model,
+                        "rate_limited",
+                        generations,
+                        error_type="HTTP_429",
+                        error_detail=detail.headers.get("Retry-After"),
+                    )
+                    return "rate_limited"
+                detail.raise_for_status()
+                for generation in targets:
+                    mods = self.parse_drom_generation(
+                        detail.content, generation_url, generation.body_types
+                    )
+                    known = {item.id for item in generation.modifications}
+                    generation.modifications.extend(item for item in mods if item.id not in known)
+            await self.cache.merge_model_observation(
+                brand, model, "complete", generations, replace_source="drom.ru"
+            )
+            return "complete"
+        except (httpx.HTTPError, ValueError) as exc:
+            state = "source_unavailable" if isinstance(exc, httpx.HTTPError) else "parse_error"
+            error_type = (
+                f"HTTP_{exc.response.status_code}"
+                if isinstance(exc, httpx.HTTPStatusError)
+                else type(exc).__name__
+            )
+            await self.cache.merge_model_observation(
+                brand, model, state, error_type=error_type, error_detail=str(exc)[:240]
+            )
+            return state
+
+    @staticmethod
+    def _has_generation_marker(content: bytes) -> bool:
+        soup = BeautifulSoup(content, "lxml")
+        return bool(
+            soup.select('[data-ga-stats-name="generations_outlet_item"]')
+            or any(
+                re.search(r"поколени[ея]|generations?", heading.get_text(" ", strip=True), re.I)
+                for heading in soup.find_all(["h2", "h3"])
+            )
+        )
 
     @classmethod
     def parse_drom_year(
         cls, content: bytes, brand: str, model: str, year: int, page_url: str
     ) -> list[VehicleGeneration]:
+        del brand, model, year  # Catalog years come only from the source page.
         soup = BeautifulSoup(content, "lxml")
-        generations: dict[tuple[str, int], VehicleGeneration] = {}
+        generations: dict[tuple[str, str | int | None], VehicleGeneration] = {}
+        for heading in soup.find_all("h3"):
+            # Drom puts all generation sections under one parent. Restrict cards
+            # to siblings after this heading and before the next h3; selecting
+            # from heading.parent incorrectly assigns every model card to every
+            # generation (and can merge the 1999 production start into 2026).
+            section_nodes: list[Tag] = []
+            for sibling in heading.next_siblings:
+                if isinstance(sibling, Tag) and sibling.name == "h3":
+                    break
+                if isinstance(sibling, Tag):
+                    section_nodes.append(sibling)
+            cards = [
+                card
+                for node in section_nodes
+                for card in (
+                    [node]
+                    if node.get("data-ga-stats-name") == "generations_outlet_item"
+                    else node.select('[data-ga-stats-name="generations_outlet_item"]')
+                )
+            ]
+            if not cards:
+                continue
+            section_text = heading.get_text(" ", strip=True)
+            ordinal = next(
+                (
+                    span.get_text(" ", strip=True)
+                    for span in section_nodes
+                    if span.name == "span"
+                    if "поколен" in span.get_text(" ", strip=True).casefold()
+                ),
+                section_text,
+            )
+            heading_years = [int(value) for value in re.findall(r"(?:19|20)\d{2}", section_text)]
+            code_match = re.search(r",\s*([^,]+),\s*(?:19|20)\d{2}\b", section_text)
+            code = code_match.group(1).strip() if code_match else None
+            for card in cards:
+                link = card.find("a", href=True)
+                if not isinstance(link, Tag):
+                    continue
+                generation_url = urljoin(page_url, str(link.get("href")))
+                if not re.search(r"/catalog/[^/]+/[^/]+/g_[^/]+/$", generation_url):
+                    continue
+                caption = card.find(attrs={"data-ftid": "component_article_caption"})
+                period_text = caption.get_text(" ", strip=True) if isinstance(caption, Tag) else ""
+                period_years = [int(value) for value in re.findall(r"(?:19|20)\d{2}", period_text)]
+                year_from = (
+                    period_years[0]
+                    if period_years
+                    else (heading_years[0] if heading_years else None)
+                )
+                year_to = (
+                    period_years[1]
+                    if len(period_years) > 1
+                    else (heading_years[1] if len(heading_years) > 1 else None)
+                )
+                body = cls._body_from_text(card.get_text(" ", strip=True))
+                key = (ordinal.casefold(), section_text.casefold())
+                ref = _source_ref("drom.ru", generation_url)
+                candidate = VehicleGeneration(
+                    id=f"drom:{ref.slug}",
+                    name=f"{code} · {ordinal}" if code else ordinal,
+                    year_from=year_from,
+                    year_to=year_to,
+                    body_types=[body] if body else [],
+                    source_refs=[ref],
+                )
+                previous = generations.get(key)
+                if previous is None:
+                    generations[key] = candidate
+                else:
+                    merged = CatalogCache._merge_generation(
+                        previous.model_dump(mode="json"), candidate.model_dump(mode="json")
+                    )
+                    generations[key] = VehicleGeneration.model_validate(merged)
+        if generations:
+            return list(generations.values())
+
+        # Older catalog pages embed modification tables directly under headings.
         for heading in soup.find_all("h3"):
             link = heading.find("a", href=True)
             table = heading.find_next("table", class_="complectation-table")
@@ -837,7 +1175,7 @@ class CatalogEnrichmentService:
                 continue
             heading_text = heading.get_text(" ", strip=True)
             years = [int(value) for value in re.findall(r"(?:19|20)\d{2}", heading_text)]
-            year_from = years[0] if years else year
+            year_from = years[0] if years else None
             year_to = years[1] if len(years) > 1 else None
             body = cls._body_from_text(heading_text)
             modifications, body_codes = cls._parse_modification_table(table, generation_url, body)
@@ -861,16 +1199,33 @@ class CatalogEnrichmentService:
                     modifications=modifications,
                 )
             else:
-                existing.year_to = max(
-                    (value for value in (existing.year_to, year_to) if value is not None),
-                    default=None,
+                existing.year_to = (
+                    None if None in (existing.year_to, year_to) else max(existing.year_to, year_to)
                 )
+                if body and body not in existing.body_types:
+                    existing.body_types.append(body)
                 existing.source_refs.append(_source_ref("drom.ru", generation_url))
                 known = {item.id for item in existing.modifications}
                 existing.modifications.extend(
                     item for item in modifications if item.id not in known
                 )
         return list(generations.values())
+
+    @classmethod
+    def parse_drom_generation(
+        cls, content: bytes, generation_url: str, body_types: list[BodyType]
+    ) -> list[VehicleModification]:
+        soup = BeautifulSoup(content, "lxml")
+        by_id: dict[str, VehicleModification] = {}
+        for table in soup.find_all("table"):
+            if not table.find("a", href=re.compile(r"/\d+/?$")):
+                continue
+            modifications, _ = cls._parse_modification_table(
+                table, generation_url, body_types[0] if len(body_types) == 1 else None
+            )
+            for modification in modifications:
+                by_id[modification.id] = modification
+        return list(by_id.values())
 
     @classmethod
     def _parse_modification_table(
@@ -883,9 +1238,12 @@ class CatalogEnrichmentService:
         body_codes: set[str] = set()
         for row in table.find_all("tr"):
             cells = row.find_all(["th", "td"], recursive=False)
-            if len(cells) == 1 and cells[0].name == "th":
+            if len(cells) == 1 and (cells[0].name == "th" or int(cells[0].get("colspan", 1)) >= 3):
                 spec = cells[0].get_text(" ", strip=True)
                 current = cls._engine_from_text(spec)
+                engine_link = cells[0].find("a", href=re.compile(r"/engine/"))
+                if isinstance(engine_link, Tag):
+                    current.engine_code = engine_link.get_text(" ", strip=True) or None
                 transmission = Normalizer.transmission_from_text(spec)
                 drivetrain = cls._drivetrain_from_text(spec)
                 continue
@@ -896,7 +1254,7 @@ class CatalogEnrichmentService:
             if not re.search(r"/\d+/$", urlparse(url).path):
                 continue
             name = link.get_text(" ", strip=True)
-            engine_code = cells[3].get_text(" ", strip=True) or None
+            engine_code = current.engine_code or cells[3].get_text(" ", strip=True) or None
             body_code = cells[4].get_text(" ", strip=True)
             if body_code:
                 body_codes.add(body_code)

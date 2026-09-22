@@ -47,7 +47,7 @@ export interface CarListing {
   engine_code: string | null;
   drivetrain: string | null;
   year: number;
-  body_type: BodyType;
+  body_type: BodyType | null;
   transmission: Transmission | null;
   price: number;
   url: string;

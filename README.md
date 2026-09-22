@@ -59,9 +59,24 @@ Frontend загружает марки через `GET /api/catalog/brands`, а 
 
 Catalog schema v3 разделяет brand, model, generation, modification и engine. Для каждой
 сущности сохраняются source-specific URL/path/slug. Поколения и двигатели загружаются
-лениво через `/api/catalog/generations` и `/api/catalog/engines`, имеют TTL 90 дней и
-кешируются в том же локальном снимке. Каталог остаётся autocomplete-помощником:
+лениво через `/api/catalog/generation-state` и `/api/catalog/engines`, имеют TTL 90 дней и
+кешируются в `data/vehicle_catalog_runtime.json` отдельно от неизменяемого release seed.
+Статус загрузки различает `ready`, отсутствие поколений и ошибки источника. Каталог остаётся autocomplete-помощником:
 неизвестные марку и модель можно вводить вручную.
+
+Полная проверка и пополнение каталога запускаются отдельно от пользовательского поиска:
+
+```powershell
+uv run python -m backend.tools.catalog_audit --output data/catalog_audit_report.json
+uv run python -m backend.tools.catalog_enrich --resume --pace-seconds 1.5
+uv run python -m backend.tools.catalog_enrich --resume --retry-failed
+uv run python -m backend.tools.drom_smoke --select-only
+```
+
+Audit проходит все модели без сетевых запросов и сохраняет coverage по каждой марке.
+Enrichment ставит контрольную точку после каждой модели и останавливается при 429/403.
+Только после полного успешного аудита runtime можно вручную перенести в release seed
+командой `uv run python -m backend.tools.catalog_enrich --promote`.
 
 Поисковая identity содержит стабильные `canonical_brand_id`, `canonical_model_id`,
 `canonical_generation_id` и `canonical_modification_id`. Display name не используется

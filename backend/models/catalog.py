@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -61,6 +62,19 @@ class CatalogModel(BaseModel):
     source_refs: list[SourceReference] = Field(default_factory=list)
     generations: list[VehicleGeneration] = Field(default_factory=list)
     details_updated_at: datetime | None = None
+    details_parser_version: int | None = None
+    details_status: Literal[
+        "complete",
+        "source_has_no_generation_data",
+        "parse_error",
+        "source_unavailable",
+        "rate_limited",
+        "not_checked",
+    ] = "not_checked"
+    details_checked_at: datetime | None = None
+    details_retry_at: datetime | None = None
+    details_error_type: str | None = None
+    details_error_detail: str | None = None
 
 
 class CatalogBrand(BaseModel):
