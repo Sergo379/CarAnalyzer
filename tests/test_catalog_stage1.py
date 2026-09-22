@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
+
 from backend.models.car import SearchRequest
 from backend.models.catalog import (
     EngineSpec,
@@ -93,6 +95,22 @@ def test_model_freshness_is_independent_of_requested_year_and_negative_status_ca
     asyncio.run(cache.merge_model_observation("Make", "Beta", "source_has_no_generation_data"))
     assert cache.details_are_fresh_window("Make", "Beta", 2022, 2022)
     assert cache.model_entry("Make", "Beta")["generations"] == []
+
+
+def test_source_with_no_generation_markup_gets_explicit_negative_status(tmp_path):
+    cache = _catalog(tmp_path)
+    service = CatalogEnrichmentService(cache)
+
+    async def check():
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, text="<h1>Make Beta</h1>")
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await service.enrich_model("Make", "Beta", client)
+
+    assert asyncio.run(check()) == "source_has_no_generation_data"
+    assert cache.model_entry("Make", "Beta")["details_status"] == "source_has_no_generation_data"
+    assert cache.details_are_fresh_window("Make", "Beta", 2000, 2000)
 
 
 def test_legacy_timestamp_without_observation_status_is_not_fresh(tmp_path):
