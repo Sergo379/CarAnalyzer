@@ -112,6 +112,10 @@ def test_outdated_parser_version_is_refetched_and_replaced_without_old_years(tmp
     entry["details_parser_version"] = 1
     cache.save(cache.load())
     assert not cache.details_are_fresh_window("Make", "Alpha", 2026, 2026)
+    assert _eligible(entry, retry_failed=False)
+    stale_report = audit_catalog(cache)
+    assert stale_report["summary"]["needs_reparse"] == 1
+    assert stale_report["summary"]["pending"] == 2
     corrected = old.model_copy(update={"year_from": 2026})
     asyncio.run(
         cache.merge_model_observation(
@@ -121,6 +125,7 @@ def test_outdated_parser_version_is_refetched_and_replaced_without_old_years(tmp
     fixed = cache.model_entry("Make", "Alpha")
     assert fixed["generations"][0]["year_from"] == 2026
     assert fixed["details_parser_version"] == 3
+    assert audit_catalog(cache)["summary"]["validated_complete"] == 1
 
 
 def test_concurrent_model_observations_do_not_lose_updates(tmp_path):
@@ -216,6 +221,7 @@ def test_full_offline_audit_reports_explicit_empty_status_and_alias_collision(tm
     report = audit_catalog(cache)
     assert report["summary"]["models_audited"] == 2
     assert report["summary"]["source_has_no_generation_data"] == 1
+    assert report["summary"]["pending"] == 1
     assert report["summary"]["generation_coverage_pct"] == 0
     assert report["records"][0]["details_status"] == "source_has_no_generation_data"
     payload = cache.load()

@@ -123,6 +123,9 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
                 errors.append({"id": model_id, "type": "outdated_parser_version"})
                 counts["needs_reparse"] += 1
                 brand_counts["needs_reparse"] += 1
+            elif status == "complete":
+                counts["validated_complete"] += 1
+                brand_counts["validated_complete"] += 1
             if status not in DETAIL_STATUSES:
                 errors.append({"id": model_id, "type": "invalid_details_status", "status": status})
             if status == "complete" and not generations:
@@ -205,6 +208,7 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
                 "id": brand_id,
                 "name": brand.get("name"),
                 **dict(brand_counts),
+                "pending": brand_counts["not_checked"] + brand_counts["needs_reparse"],
                 "generation_coverage_pct": round(
                     100 * brand_counts["models_with_generations"] / total, 2
                 )
@@ -222,6 +226,7 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
         "total_models": total,
         "models_audited": len(records),
         **dict(counts),
+        "pending": counts["not_checked"] + counts["needs_reparse"],
         "models_without_source_refs": total - counts["models_with_source_refs"],
         "models_without_generations": total - counts["models_with_generations"],
         "unique_engines": len(engine_keys),
