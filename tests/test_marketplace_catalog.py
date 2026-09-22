@@ -152,3 +152,23 @@ def test_failed_sync_preserves_existing_cache() -> None:
         raise AssertionError("sync should fail when every source is unavailable")
     assert json.loads(cache_path.read_text(encoding="utf-8"))["version"] == 1
     cache_path.unlink()
+
+
+def test_sync_merges_conservative_cross_source_spelling_variants() -> None:
+    cache_path = _cache_path("near-alias.json")
+    service = CatalogSyncService(
+        sources=[
+            FakeSource("first.test", {"Example": ["Roadstar"]}),
+            FakeSource("second.test", {"Example": ["Roadster"]}),
+        ],
+        cache=CatalogCache(cache_path),
+    )
+    asyncio.run(service.sync())
+    entries = CatalogCache(cache_path).model_entries("Example")
+    assert len(entries) == 1
+    assert entries[0]["aliases"] == ["Roadster"]
+    assert {item["source"] for item in entries[0]["source_refs"]} == {
+        "first.test",
+        "second.test",
+    }
+    cache_path.unlink()

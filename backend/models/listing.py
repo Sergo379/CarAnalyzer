@@ -20,6 +20,10 @@ class CarListing(BaseModel):
     external_id: str = Field(min_length=1, max_length=255)
     brand: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
+    canonical_brand_id: str | None = None
+    canonical_model_id: str | None = None
+    canonical_generation_id: str | None = None
+    canonical_modification_id: str | None = None
     modification: str | None = Field(default=None, max_length=300)
     generation: str | None = Field(default=None, max_length=160)
     fuel_type: str | None = Field(default=None, max_length=40)
@@ -64,3 +68,15 @@ class ModelGroup(BaseModel):
 class CategoryResult(BaseModel):
     listings: list[ClassifiedListing] = Field(default_factory=list)
     model_groups: list[ModelGroup] = Field(default_factory=list)
+
+
+class SourceDiagnostics(BaseModel):
+    pages_scanned: int = Field(default=0, ge=0)
+    raw_count: int = Field(default=0, ge=0)
+    parsed_count: int = Field(default=0, ge=0)
+    accepted_count: int = Field(default=0, ge=0)
+    detail_requests: int = Field(default=0, ge=0)
+    browser_fallbacks: int = Field(default=0, ge=0)
+    elapsed_seconds: float = Field(default=0, ge=0)
+    rejected: dict[str, int] = Field(default_factory=dict)
+    resolved_url: str | None = None

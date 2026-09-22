@@ -31,7 +31,7 @@ def test_search_api_uses_typed_end_to_end_schema_without_fake_listings() -> None
     payload = response.json()
     assert response.status_code == 200
     assert payload["source_vehicle"]["brand"] == "BMW"
-    assert payload["source_vehicle"]["model"] == "5 Series"
+    assert payload["source_vehicle"]["model"] == "5-Series"
     assert payload["source_vehicle"]["modification"] == "520i"
     assert payload["source_vehicle"]["segment"] == "passenger_premium"
     assert payload["source_status"] == {}
@@ -57,6 +57,31 @@ def test_search_api_rejects_invalid_body_and_price() -> None:
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 422
+
+
+def test_search_api_accepts_year_and_price_ranges() -> None:
+    app.dependency_overrides[get_search_service] = lambda: SearchService(scrapers=[])
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/search",
+                json={
+                    "brand": "Toyota",
+                    "model": "Camry",
+                    "year_mode": "range",
+                    "year_from": 2018,
+                    "year_to": 2020,
+                    "price_mode": "range",
+                    "price_from": 2_000_000,
+                    "price_to": 3_000_000,
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    vehicle = response.json()["source_vehicle"]
+    assert vehicle["year"] is None and vehicle["year_from"] == 2018
+    assert vehicle["price"] is None and vehicle["price_to"] == 3_000_000
 
 
 def test_vehicle_catalog_models_are_dependent_on_brand() -> None:

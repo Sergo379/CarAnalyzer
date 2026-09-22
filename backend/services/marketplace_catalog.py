@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup, Tag
 
 from backend.models.car import BodyType
 from backend.models.catalog import (
+    CanonicalVehicleIdentity,
     CatalogBrand,
     CatalogModel,
     EngineSpec,
@@ -197,8 +198,24 @@ def _strip_brand_prefix(name: str, brand: str) -> str:
 
 def _model_key(value: str) -> str:
     normalized = value.casefold().replace("серии", "series").replace("серия", "series")
-    normalized = normalized.replace("kaptur", "captur")
-    return _key(normalized)
+    key = _key(normalized)
+    match = re.fullmatch(r"(\d+)er", key)
+    return f"{match.group(1)}series" if match else key
+
+
+def _near_alias(left: str, right: str) -> bool:
+    """Conservative one-edit fallback for cross-source spellings of longer model names."""
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 5 or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    index = 0
+    while index < len(shorter) and shorter[index] == longer[index]:
+        index += 1
+    return shorter[index:] == longer[index + 1 :]
 
 
 def _source_ref(source: str, url: str) -> SourceReference:
@@ -244,6 +261,64 @@ class CatalogCache:
                 return entry
         return None
 
+    def resolve_identity(self, brand: str, model: str) -> CanonicalVehicleIdentity:
+        brand_entry = self._brand_entry(brand)
+        provisional_brand = _key(_brand_name(brand)) or "unknown"
+        if brand_entry is None:
+            provisional_model = _model_key(model) or "unknown"
+            return CanonicalVehicleIdentity(
+                canonical_brand_id=f"provisional:{provisional_brand}",
+                canonical_model_id=f"provisional:{provisional_brand}:{provisional_model}",
+                brand=Normalizer.brand(brand),
+                model=Normalizer.model(model),
+                provisional=True,
+            )
+
+        entries = list(brand_entry.get("models", []))
+        needle = _model_key(model)
+        match = self.model_entry(str(brand_entry["name"]), model)
+        if match is None:
+            candidates: list[tuple[int, dict[str, object]]] = []
+            for entry in entries:
+                names = [str(entry["name"]), *(str(x) for x in entry.get("aliases", []))]
+                for value in names:
+                    key = _model_key(value)
+                    if key and (key in needle or needle in key):
+                        candidates.append((len(key), entry))
+                for raw_ref in entry.get("source_refs", []):
+                    ref_key = _model_key(str(raw_ref.get("slug", "")))
+                    if ref_key and (ref_key in needle or needle in ref_key):
+                        candidates.append((len(ref_key), entry))
+            # A three-digit trim such as 520i -> 5 Series is a catalog-derived
+            # fallback, not a make-specific rule.
+            numeric = re.match(r"([1-9])\d{2}[a-z]*$", needle)
+            if numeric:
+                ordinal = numeric.group(1)
+                for entry in entries:
+                    key = _model_key(str(entry["name"]))
+                    if key.startswith(ordinal) and any(
+                        marker in key for marker in ("series", "серии", "serie", "er")
+                    ):
+                        candidates.append((10_000 - len(key), entry))
+            if candidates:
+                match = max(candidates, key=lambda item: item[0])[1]
+
+        if match is None:
+            provisional_model = needle or "unknown"
+            return CanonicalVehicleIdentity(
+                canonical_brand_id=str(brand_entry["id"]),
+                canonical_model_id=f"provisional:{brand_entry['id']}:{provisional_model}",
+                brand=str(brand_entry["name"]),
+                model=Normalizer.model(model),
+                provisional=True,
+            )
+        return CanonicalVehicleIdentity(
+            canonical_brand_id=str(brand_entry["id"]),
+            canonical_model_id=str(match["id"]),
+            brand=str(brand_entry["name"]),
+            model=str(match["name"]),
+        )
+
     def source_model_ref(self, source: str, brand: str, model: str) -> SourceReference | None:
         entry = self.model_entry(brand, model)
         if not entry:
@@ -255,23 +330,36 @@ class CatalogCache:
         return None
 
     def generations(
-        self, brand: str, model: str, year: int | None = None
+        self,
+        brand: str,
+        model: str,
+        year: int | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
     ) -> list[dict[str, object]]:
         entry = self.model_entry(brand, model)
         generations = list(entry.get("generations", [])) if entry else []
-        if year is None:
+        if year is not None:
+            year_from = year_to = year
+        if year_from is None or year_to is None:
             return generations
         return [
             item
             for item in generations
-            if (item.get("year_from") is None or int(item["year_from"]) <= year)
-            and (item.get("year_to") is None or int(item["year_to"]) >= year)
+            if (item.get("year_from") is None or int(item["year_from"]) <= year_to)
+            and (item.get("year_to") is None or int(item["year_to"]) >= year_from)
         ]
 
     def modifications(
-        self, brand: str, model: str, year: int, generation_id: str | None = None
+        self,
+        brand: str,
+        model: str,
+        year: int | None = None,
+        generation_id: str | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
     ) -> list[dict[str, object]]:
-        generations = self.generations(brand, model, year)
+        generations = self.generations(brand, model, year, year_from, year_to)
         if generation_id:
             generations = [item for item in generations if item["id"] == generation_id]
         result: list[dict[str, object]] = []
@@ -397,6 +485,10 @@ class CatalogSyncService:
                 for source_model in source_brand.models:
                     model_name = _strip_brand_prefix(source_model.name, source_brand.name)
                     key = _model_key(model_name)
+                    key = next(
+                        (known for known in models if _near_alias(known, key)),
+                        key,
+                    )
                     model = models.setdefault(
                         key,
                         CatalogModel(id=f"{brand_key}:{key}", name=model_name, source_refs=[]),

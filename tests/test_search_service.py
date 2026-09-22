@@ -32,6 +32,21 @@ class RateLimitedScraper(BaseScraper):
         raise Http429Error("rate limited")
 
 
+class SlowScraper(BaseScraper):
+    source = "slow"
+
+    def __init__(self) -> None:
+        from backend.config import Settings
+
+        self.settings = Settings(
+            _env_file=None, source_search_timeout_seconds=0.01, search_total_timeout_seconds=0.1
+        )
+
+    async def search(self, query: SearchRequest) -> list[CarListing]:
+        await asyncio.sleep(1)
+        return []
+
+
 class BroadScraper(BaseScraper):
     source = "broad"
 
@@ -107,6 +122,18 @@ def test_partial_source_failure_keeps_successful_data() -> None:
     assert result.warnings
 
 
+def test_source_timeout_keeps_completed_sources() -> None:
+    result = asyncio.run(
+        SearchService(
+            scrapers=[SlowScraper(), StaticScraper("auto.ru", [listing("auto.ru", "1", 4_100_000)])]
+        ).search(
+            SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status["slow"] == SourceState.TIMEOUT
+    assert result.source_status["auto.ru"] == SourceState.OK
+
+
 def test_http_429_has_precise_source_status() -> None:
     result = asyncio.run(
         SearchService(scrapers=[RateLimitedScraper()]).search(
@@ -151,8 +178,8 @@ def test_unknown_ford_uses_broad_price_body_discovery_and_price_700000() -> None
     assert result.source_vehicle.model == "Fiesta"
     assert result.source_vehicle.segment == "passenger_value"
     assert result.direct.listings[0].listing.model == "Yaris"
-    assert "Ford|Fiesta|2016" in result.car_knowledge
-    assert "Toyota|Yaris|2017" in result.car_knowledge
+    assert "ford:fiesta|2016" in result.car_knowledge
+    assert "toyota:yaris|2017" in result.car_knowledge
 
 
 def test_catalog_failure_does_not_break_market_discovery() -> None:
@@ -232,6 +259,7 @@ def test_source_model_listings_are_separate_with_statistics() -> None:
     assert result.source_listings.listings[0].price_difference == -100_000
     assert result.source_model_group is not None
     assert result.source_model_group.average_price == 4_000_000
+    assert result.source_distribution == {"broad": 0, "auto.ru": 1}
     assert all(item.listing.model != "5 Series" for item in result.direct.listings)
 
 

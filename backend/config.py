@@ -20,8 +20,11 @@ class Settings(BaseSettings):
     cheaper_max_percent: float = Field(default=0.20, gt=0, lt=1)
     auto_ru_base_url: str = "https://auto.ru"
     scraper_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    source_search_timeout_seconds: float = Field(default=25.0, gt=0, le=120)
+    search_total_timeout_seconds: float = Field(default=45.0, gt=0, le=180)
     scraper_detail_concurrency: int = Field(default=4, ge=1, le=10)
-    scraper_max_details: int = Field(default=40, ge=1, le=100)
+    scraper_max_pages: int = Field(default=10, ge=1, le=50)
+    scraper_max_listings: int = Field(default=500, ge=1, le=5000)
     car_knowledge_ttl_days: int = Field(default=90, ge=1, le=3650)
 
     @model_validator(mode="after")
@@ -30,6 +33,10 @@ class Settings(BaseSettings):
             raise ValueError("expensive_max_percent must exceed direct_price_percent")
         if self.cheaper_max_percent < self.cheaper_min_percent:
             raise ValueError("cheaper_max_percent must be >= cheaper_min_percent")
+        if self.search_total_timeout_seconds < self.source_search_timeout_seconds:
+            raise ValueError(
+                "search_total_timeout_seconds must be >= source_search_timeout_seconds"
+            )
         return self
 
     def resolved_database_path(self) -> Path:

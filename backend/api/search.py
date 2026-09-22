@@ -1,7 +1,7 @@
 from contextlib import suppress
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend.models.car import SearchRequest
 from backend.models.catalog import VehicleModification
@@ -39,11 +39,32 @@ async def catalog_models(brand: str) -> list[str]:
     return CatalogCache().models(brand)
 
 
+def _year_window(year: int | None, year_from: int | None, year_to: int | None) -> tuple[int, int]:
+    if year is not None:
+        return year, year
+    if year_from is None or year_to is None or year_from > year_to:
+        raise HTTPException(422, "Provide year or a valid year_from/year_to range")
+    return year_from, year_to
+
+
+async def _enrich_window(cache: CatalogCache, brand: str, model: str, start: int, end: int) -> None:
+    years = range(start, end + 1) if end - start <= 20 else {start, round((start + end) / 2), end}
+    for selected_year in years:
+        with suppress(Exception):
+            await CatalogEnrichmentService(cache).ensure(brand, model, selected_year)
+
+
 @router.get("/catalog/generations")
-async def catalog_generations(brand: str, model: str, year: int) -> list[dict[str, object]]:
+async def catalog_generations(
+    brand: str,
+    model: str,
+    year: int | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[dict[str, object]]:
     cache = CatalogCache()
-    with suppress(Exception):
-        await CatalogEnrichmentService(cache).ensure(brand, model, year)
+    start, end = _year_window(year, year_from, year_to)
+    await _enrich_window(cache, brand, model, start, end)
     return [
         {
             "id": item["id"],
@@ -52,7 +73,7 @@ async def catalog_generations(brand: str, model: str, year: int) -> list[dict[st
             "year_from": item.get("year_from"),
             "year_to": item.get("year_to"),
         }
-        for item in cache.generations(brand, model, year)
+        for item in cache.generations(brand, model, year_from=start, year_to=end)
     ]
 
 
@@ -60,18 +81,26 @@ async def catalog_generations(brand: str, model: str, year: int) -> list[dict[st
 async def catalog_engines(
     brand: str,
     model: str,
-    year: int,
+    year: int | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
     generation_id: str | None = None,
 ) -> list[dict[str, object]]:
     cache = CatalogCache()
-    with suppress(Exception):
-        await CatalogEnrichmentService(cache).ensure(brand, model, year)
+    start, end = _year_window(year, year_from, year_to)
+    await _enrich_window(cache, brand, model, start, end)
     return [
         {
             **item,
             "label": VehicleModification.model_validate(item).label,
         }
-        for item in cache.modifications(brand, model, year, generation_id)
+        for item in cache.modifications(
+            brand,
+            model,
+            generation_id=generation_id,
+            year_from=start,
+            year_to=end,
+        )
     ]
 
 

@@ -70,8 +70,9 @@ class Normalizer:
     @classmethod
     def brand(cls, value: str) -> str:
         cleaned = cls.text(value)
-        known = {"bmw": "BMW", "audi": "Audi", "mercedes-benz": "Mercedes-Benz"}
-        return known.get(cleaned.casefold(), cleaned.title())
+        if cleaned.isupper() and len(cleaned) <= 6:
+            return cleaned
+        return "-".join(part.capitalize() for part in cleaned.split("-"))
 
     @classmethod
     def model(cls, value: str) -> str:
@@ -79,22 +80,8 @@ class Normalizer:
 
     @classmethod
     def vehicle_identity(cls, brand: str, model: str) -> VehicleIdentity:
-        """Split an entered designation into family and modification without AI."""
-        normalized_brand = cls.brand(brand)
-        normalized_model = cls.model(model)
-        if normalized_brand == "BMW":
-            match = re.fullmatch(r"([1-8])\d{2}[a-z]{0,3}(?:\s+.*)?", normalized_model, re.I)
-            if match:
-                return VehicleIdentity(
-                    normalized_brand, f"{match.group(1)} Series", normalized_model
-                )
-        if normalized_brand == "Mercedes-Benz":
-            match = re.fullmatch(r"([a-z])\s*-?\s*\d{3}.*", normalized_model, re.I)
-            if match:
-                return VehicleIdentity(
-                    normalized_brand, f"{match.group(1).upper()}-Class", normalized_model
-                )
-        return VehicleIdentity(normalized_brand, normalized_model, None)
+        """Normalize free-form input; catalog resolution owns family matching."""
+        return VehicleIdentity(cls.brand(brand), cls.model(model), None)
 
     @classmethod
     def marketplace_identity(
@@ -106,17 +93,9 @@ class Normalizer:
     ) -> VehicleIdentity:
         normalized_brand = cls.brand(brand)
         slug = (model_slug or "").strip("/ ").casefold()
-        slug_aliases = {
-            "5er": "5 Series",
-            "5-series": "5 Series",
-            "e_klasse": "E-Class",
-            "e-class": "E-Class",
-        }
         if slug:
-            family = slug_aliases.get(slug)
-            if family is None:
-                family = " ".join(part.capitalize() for part in re.split(r"[-_]", slug))
-                family = re.sub(r"\bX(\d)\b", r"X\1", family, flags=re.I)
+            family = " ".join(part.capitalize() for part in re.split(r"[-_]", slug))
+            family = re.sub(r"\bX(\d)\b", r"X\1", family, flags=re.I)
         else:
             cleaned = re.sub(
                 rf"^{re.escape(normalized_brand)}\s+",

@@ -74,20 +74,23 @@ class CompetitorEngine:
         self, source: Car | SourceVehicle, listings: Sequence[CarListing]
     ) -> CompetitorGroups:
         groups = CompetitorGroups()
+        reference_price = (
+            source.reference_price if isinstance(source, SourceVehicle) else source.price
+        )
         for listing in listings:
             body_matches = source.body_type == BodyFilter.ANY or self.body_is_compatible(
                 BodyType(source.body_type.value), listing.body_type
             )
             if not body_matches or not self.segment_is_compatible(source.segment, listing.segment):
                 continue
-            category = self.classify_price(source.price, listing.price)
+            category = self.classify_price(reference_price, listing.price)
             if category is None:
                 continue
-            difference = listing.price - source.price
+            difference = listing.price - reference_price
             item = ClassifiedListing(
                 listing=listing,
                 price_difference=difference,
-                price_difference_percent=round(difference / source.price * 100, 2),
+                price_difference_percent=round(difference / reference_price * 100, 2),
             )
             getattr(groups, category.value).append(item)
         return groups

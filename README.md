@@ -19,7 +19,13 @@ guard. Объявления с неизвестной коробкой искл�
 
 Ответ `/api/search` отдельно возвращает `source_listings` и `source_model_group` — live
 объявления введённой модели, разницу с введённой ценой и статистику min/avg/max. Эти
-объявления не смешиваются с `direct`, `expensive` и `cheaper`.
+объявления не смешиваются с `direct`, `expensive` и `cheaper`. `source_distribution`
+показывает число принятых объявлений по каждой площадке.
+
+Год и цена поддерживают режимы `exact` и `range`. В диапазонном режиме исходный рынок
+фильтруется по указанным границам, а reference price вычисляется как середина диапазона;
+утверждённые процентные окна конкурентов при этом не меняются. Поколения выбираются по
+пересечению production interval с выбранным годом или диапазоном.
 
 ## Запуск
 
@@ -57,6 +63,11 @@ Catalog schema v3 разделяет brand, model, generation, modification и e
 кешируются в том же локальном снимке. Каталог остаётся autocomplete-помощником:
 неизвестные марку и модель можно вводить вручную.
 
+Поисковая identity содержит стабильные `canonical_brand_id`, `canonical_model_id`,
+`canonical_generation_id` и `canonical_modification_id`. Display name не используется
+как основной ключ группировки, исключения исходной модели из конкурентов или knowledge
+deduplication. Если записи нет в каталоге, создаётся provisional canonical identity.
+
 Обновить локальный кеш из обоих публичных каталогов:
 
 ```powershell
@@ -72,6 +83,15 @@ Drom model resolver использует source refs из каталога, а �
 профиля; CAPTCHA не обходится. HTTP 429 описывается как ограничение автоматического
 доступа, а не как доказательство блокировки IP.
 
+Auto.ru также использует catalog source mapping; если конкретного source ref пока нет,
+адаптер безопасно переходит к выдаче марки и применяет canonical/local guard. Auto.ru и
+Drom следуют явной ссылке следующей страницы до её исчезновения, отсутствия новых ID или
+настраиваемых safety caps `scraper_max_pages`/`scraper_max_listings`.
+
+Безопасный debug mode включается полем `debug: true` в `/api/search`. В ответе появляются
+только URL запроса и счётчики `pages_scanned`, `raw_count`, `parsed_count`,
+`accepted_count`, `rejected`; cookies, заголовки авторизации и credentials не собираются.
+
 ## macOS Apple Silicon
 
 Если файлы были переданы не через Git, один раз выполните
@@ -79,8 +99,9 @@ Drom model resolver использует source refs из каталога, а �
 `install.command` и используйте `start.command`. Для безопасного
 обновления без удаления `.env` и SQLite knowledge DB предусмотрен `update.command`.
 
-`source_status` различает `captcha_required`, `http_429`, `http_403`, `parse_error` и
-другие состояния. Avito на текущей сети отвечает HTTP 429 с причиной «проблема с IP»
-даже в isolated Playwright context. Drom после серии запросов также может включить
-HTTP 429 rate limit. Отказ одного источника не мешает показать данные остальных.
+`source_status` различает `captcha_required`, `http_429`, `http_403`,
+`browser_access_limited`, `parse_error` и другие состояния. При HTTP 403/429 Avito и
+Drom проверяют доступ через isolated Playwright context без личного browser profile.
+На текущей сети Avito ограничивает и этот путь; это не интерпретируется как постоянная
+блокировка IP. Отказ одного источника не мешает показать данные остальных.
 AI/RAG synthesis не вызывается без отдельно настроенных credentials.

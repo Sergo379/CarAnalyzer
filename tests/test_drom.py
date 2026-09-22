@@ -4,21 +4,39 @@ import httpx
 
 from backend.config import Settings
 from backend.models.car import MarketDiscoveryRequest, SearchRequest
-from backend.models.catalog import SourceReference
+from backend.models.catalog import CanonicalVehicleIdentity, SourceReference
 from backend.scrapers.drom import DromScraper
 
 QUERY = SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
 
 
 class FakeCatalog:
+    def resolve_identity(self, brand: str, model: str) -> CanonicalVehicleIdentity:
+        return CanonicalVehicleIdentity(
+            canonical_brand_id="bmw",
+            canonical_model_id="bmw:5series",
+            brand="BMW",
+            model="5-Series",
+        )
+
     def source_model_ref(self, source: str, brand: str, model: str) -> SourceReference | None:
-        assert (source, brand, model) == ("drom.ru", "BMW", "5 Series")
+        assert (source, brand, model) == ("drom.ru", "BMW", "5-Series")
         return SourceReference(
             source="drom.ru",
             url="https://www.drom.ru/catalog/bmw/5-series/",
             path="/catalog/bmw/5-series/",
             slug="5-series",
         )
+
+    def generations(
+        self,
+        brand: str,
+        model: str,
+        year: int | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[dict[str, object]]:
+        return [{"body_types": ["sedan"], "modifications": []}]
 
 
 def search_html() -> bytes:
@@ -143,3 +161,55 @@ def test_drom_any_body_omits_body_path() -> None:
     scraper = DromScraper(catalog=FakeCatalog())  # type: ignore[arg-type]
     url = scraper.build_search_url(query)
     assert "/used/?unsold=1" in url
+
+
+def test_drom_any_body_uses_unambiguous_catalog_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=search_html(), request=request)
+
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    listings = asyncio.run(scraper.search(QUERY.model_copy(update={"body_type": "any"})))
+    assert len(listings) == 1
+    assert listings[0].body_type == "sedan"
+
+
+def test_drom_follows_next_page_and_stops_without_it() -> None:
+    first_page = search_html().replace(
+        b"</body>", b'<a rel="next" href="/bmw/5-series/page2/">Next</a></body>'
+    )
+    second_page = (
+        search_html().replace(b"837871166", b"837871169").replace(b"837871167", b"837871170")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        content = second_page if "page2" in request.url.path else first_page
+        return httpx.Response(200, content=content, request=request)
+
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    listings = asyncio.run(scraper.search(QUERY))
+    assert {item.external_id for item in listings} == {"837871166", "837871169"}
+    assert scraper.combined_diagnostics().pages_scanned == 2
+
+
+def test_drom_uses_native_year_and_price_ranges() -> None:
+    query = SearchRequest(
+        brand="BMW",
+        model="520i",
+        year_mode="range",
+        year_from=2019,
+        year_to=2022,
+        price_mode="range",
+        price_from=3_000_000,
+        price_to=4_000_000,
+    )
+    url = DromScraper(catalog=FakeCatalog()).build_search_url(query)  # type: ignore[arg-type]
+    assert "/year-2019-2022/" in url
+    assert "minprice=3000000&maxprice=4000000" in url

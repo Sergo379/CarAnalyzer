@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 from backend.models.car import MarketDiscoveryRequest, SearchRequest
-from backend.models.listing import CarListing
+from backend.models.listing import CarListing, SourceDiagnostics
 
 
 class ScraperError(RuntimeError):
@@ -50,6 +50,34 @@ class ScraperParseError(ScraperError):
 
 class BaseScraper(ABC):
     source: str
+    diagnostics: dict[str, SourceDiagnostics]
+
+    def reset_diagnostics(
+        self, operation: str, resolved_url: str | None = None
+    ) -> SourceDiagnostics:
+        if not hasattr(self, "diagnostics"):
+            self.diagnostics = {}
+        value = SourceDiagnostics(resolved_url=resolved_url)
+        self.diagnostics[operation] = value
+        return value
+
+    def combined_diagnostics(self) -> SourceDiagnostics:
+        values = getattr(self, "diagnostics", {}).values()
+        rejected: dict[str, int] = {}
+        for item in values:
+            for reason, count in item.rejected.items():
+                rejected[reason] = rejected.get(reason, 0) + count
+        return SourceDiagnostics(
+            pages_scanned=sum(item.pages_scanned for item in values),
+            raw_count=sum(item.raw_count for item in values),
+            parsed_count=sum(item.parsed_count for item in values),
+            accepted_count=sum(item.accepted_count for item in values),
+            detail_requests=sum(item.detail_requests for item in values),
+            browser_fallbacks=sum(item.browser_fallbacks for item in values),
+            elapsed_seconds=max((item.elapsed_seconds for item in values), default=0),
+            rejected=rejected,
+            resolved_url=next((item.resolved_url for item in values if item.resolved_url), None),
+        )
 
     @abstractmethod
     async def search(self, query: SearchRequest) -> list[CarListing]:

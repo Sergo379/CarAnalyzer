@@ -19,6 +19,10 @@ main { width: min(1500px, calc(100% - 32px)); margin: 0 auto; padding: 36px 0 80
 .search-card { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 12px; align-items: end; padding: 20px; background: #fff; border: 1px solid #dce3eb; border-radius: 22px; box-shadow: 0 18px 50px #263a5114; }
 .search-card > button[type="submit"] { grid-column: span 1; }
 label { display: grid; gap: 7px; color: #5b697a; font-size: 12px; font-weight: 800; }
+.range-field { display: grid; gap: 7px; color: #5b697a; font-size: 12px; font-weight: 800; }
+.mode-toggle, .range-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mode-toggle button { min-height: 28px; padding: 0 8px; border: 1px solid #ccd5df; border-radius: 8px; color: #5b697a; background: #fff; box-shadow: none; font-size: 11px; }
+.mode-toggle button.active { border-color: #0d6f75; color: #075d63; background: #e8f4f3; }
 input, select { width: 100%; min-height: 46px; padding: 0 13px; border: 1px solid #ccd5df; border-radius: 12px; color: #152033; background: #fbfcfd; outline: none; }
 input:focus, select:focus { border-color: #0d6f75; box-shadow: 0 0 0 3px #0d6f7520; }
 button { min-height: 46px; padding: 0 20px; border: 0; border-radius: 12px; background: #d94b2b; color: #fff; font-weight: 900; cursor: pointer; box-shadow: 0 8px 18px #d94b2b30; }

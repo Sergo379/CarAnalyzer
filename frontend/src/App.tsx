@@ -30,11 +30,17 @@ const bodyLabels: Record<BodyFilter, string> = {
 const initialForm: SearchForm = {
   brand: "",
   model: "",
+  year_mode: "exact",
   year: "",
+  year_from: "",
+  year_to: "",
   body_type: "",
   transmission: "",
   region: "moscow_and_oblast",
+  price_mode: "exact",
   price: "",
+  price_from: "",
+  price_to: "",
   generation_id: "",
   modification_id: "",
 };
@@ -161,6 +167,9 @@ export default function App() {
   const [generations, setGenerations] = useState<CatalogOption[]>([]);
   const [engines, setEngines] = useState<CatalogOption[]>([]);
   const [regions, setRegions] = useState<SelectOption[]>(fallbackRegions);
+  const yearReady = form.year_mode === "exact"
+    ? form.year !== ""
+    : form.year_from !== "" && form.year_to !== "" && form.year_from <= form.year_to;
 
   useEffect(() => {
     Promise.all([
@@ -198,13 +207,14 @@ export default function App() {
   useEffect(() => {
     setGenerations([]);
     setEngines([]);
-    if (!form.brand.trim() || !form.model.trim() || form.year === "") return;
+    if (!form.brand.trim() || !form.model.trim() || !yearReady) return;
     const controller = new AbortController();
-    const params = new URLSearchParams({
-      brand: form.brand,
-      model: form.model,
-      year: String(form.year),
-    });
+    const params = new URLSearchParams({ brand: form.brand, model: form.model });
+    if (form.year_mode === "exact") params.set("year", String(form.year));
+    else {
+      params.set("year_from", String(form.year_from));
+      params.set("year_to", String(form.year_to));
+    }
     fetch(`/api/catalog/generations?${params}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() : [])
       .then((items: CatalogOption[]) => {
@@ -215,24 +225,25 @@ export default function App() {
       })
       .catch(() => setGenerations([]));
     return () => controller.abort();
-  }, [form.brand, form.model, form.year]);
+  }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, yearReady]);
 
   useEffect(() => {
     setEngines([]);
-    if (!form.brand.trim() || !form.model.trim() || form.year === "") return;
+    if (!form.brand.trim() || !form.model.trim() || !yearReady) return;
     const controller = new AbortController();
-    const params = new URLSearchParams({
-      brand: form.brand,
-      model: form.model,
-      year: String(form.year),
-    });
+    const params = new URLSearchParams({ brand: form.brand, model: form.model });
+    if (form.year_mode === "exact") params.set("year", String(form.year));
+    else {
+      params.set("year_from", String(form.year_from));
+      params.set("year_to", String(form.year_to));
+    }
     if (form.generation_id) params.set("generation_id", form.generation_id);
     fetch(`/api/catalog/engines?${params}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() : [])
       .then((items: CatalogOption[]) => setEngines(items))
       .catch(() => setEngines([]));
     return () => controller.abort();
-  }, [form.brand, form.model, form.year, form.generation_id]);
+  }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, form.generation_id, yearReady]);
 
   const brandOptions = useMemo(
     () => brands.map((brand) => ({ value: brand, label: brand })),
@@ -256,9 +267,12 @@ export default function App() {
     setError(null);
     if (!form.brand.trim()) return setError("Выберите или напишите марку автомобиля.");
     if (!form.model.trim()) return setError("Выберите или напишите модель автомобиля.");
-    if (form.year === "") return setError("Напишите год выпуска автомобиля.");
+    if (!yearReady) return setError("Укажите корректный год или диапазон годов.");
     if (!form.body_type) return setError("Выберите тип кузова.");
-    if (form.price === "") return setError("Напишите цену автомобиля.");
+    const priceReady = form.price_mode === "exact"
+      ? form.price !== ""
+      : form.price_from !== "" && form.price_to !== "" && form.price_from <= form.price_to;
+    if (!priceReady) return setError("Укажите корректную цену или диапазон цен.");
     setLoading(true);
     try {
       const response = await fetch("/api/search", {
@@ -266,6 +280,12 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...form,
+          year: form.year_mode === "exact" ? form.year : null,
+          year_from: form.year_mode === "range" ? form.year_from : null,
+          year_to: form.year_mode === "range" ? form.year_to : null,
+          price: form.price_mode === "exact" ? form.price : null,
+          price_from: form.price_mode === "range" ? form.price_from : null,
+          price_to: form.price_mode === "range" ? form.price_to : null,
           transmission: form.transmission || "any",
         }),
       });
@@ -301,13 +321,41 @@ export default function App() {
           });
         }} />
         <SearchableSelect label="Модель" required allowCustom disabled={!form.brand.trim()} placeholder="Выбрать модель" value={form.model} options={modelOptions} onChange={(model) => setForm({ ...form, model, generation_id: "", modification_id: "" })} />
-        <label>Год<input required placeholder="Написать год" type="number" min="1900" max={new Date().getFullYear() + 1} value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value === "" ? "" : Number(e.target.value), generation_id: "", modification_id: "" })} /></label>
-        <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || form.year === ""} placeholder="Любое поколение" value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
-        <SearchableSelect label="Двигатель" allowClear disabled={!form.brand.trim() || !form.model.trim() || form.year === ""} placeholder="Любой двигатель" value={form.modification_id} options={engineOptions} onChange={(modification_id) => setForm({ ...form, modification_id })} />
+        <div className="range-field">
+          <span>Год</span>
+          <div className="mode-toggle">
+            <button type="button" className={form.year_mode === "exact" ? "active" : ""} onClick={() => setForm({ ...form, year_mode: "exact", generation_id: "", modification_id: "" })}>Точный год</button>
+            <button type="button" className={form.year_mode === "range" ? "active" : ""} onClick={() => setForm({ ...form, year_mode: "range", generation_id: "", modification_id: "" })}>Диапазон</button>
+          </div>
+          {form.year_mode === "exact" ? (
+            <input required aria-label="Год" placeholder="Написать год" type="number" min="1900" max={new Date().getFullYear() + 1} value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value === "" ? "" : Number(e.target.value), generation_id: "", modification_id: "" })} />
+          ) : (
+            <div className="range-inputs">
+              <input required aria-label="Год от" placeholder="Год от" type="number" min="1900" value={form.year_from} onChange={(e) => setForm({ ...form, year_from: e.target.value === "" ? "" : Number(e.target.value), generation_id: "", modification_id: "" })} />
+              <input required aria-label="Год до" placeholder="Год до" type="number" min="1900" max={new Date().getFullYear() + 1} value={form.year_to} onChange={(e) => setForm({ ...form, year_to: e.target.value === "" ? "" : Number(e.target.value), generation_id: "", modification_id: "" })} />
+            </div>
+          )}
+        </div>
+        <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady} placeholder={form.year_mode === "range" ? "Все поколения в диапазоне" : "Любое поколение"} value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
+        <SearchableSelect label="Двигатель" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady} placeholder="Любой двигатель" value={form.modification_id} options={engineOptions} onChange={(modification_id) => setForm({ ...form, modification_id })} />
         <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyFilter | "" })}><option value="" disabled>Выбрать кузов</option>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
         <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission | "" })}><option value="" disabled>Тип коробки</option>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
         <SearchableSelect label="Регион поиска" required value={form.region} options={regions} onChange={(region) => setForm({ ...form, region: region as SearchRegion })} />
-        <label>Цена, ₽<input required placeholder="Написать цену" type="number" min="1" step="1" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value === "" ? "" : Number(e.target.value) })} /></label>
+        <div className="range-field">
+          <span>Цена, ₽</span>
+          <div className="mode-toggle">
+            <button type="button" className={form.price_mode === "exact" ? "active" : ""} onClick={() => setForm({ ...form, price_mode: "exact" })}>Точная цена</button>
+            <button type="button" className={form.price_mode === "range" ? "active" : ""} onClick={() => setForm({ ...form, price_mode: "range" })}>Диапазон</button>
+          </div>
+          {form.price_mode === "exact" ? (
+            <input required aria-label="Цена" placeholder="Написать цену" type="number" min="1" step="1" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value === "" ? "" : Number(e.target.value) })} />
+          ) : (
+            <div className="range-inputs">
+              <input required aria-label="Цена от" placeholder="Цена от" type="number" min="1" step="1" value={form.price_from} onChange={(e) => setForm({ ...form, price_from: e.target.value === "" ? "" : Number(e.target.value) })} />
+              <input required aria-label="Цена до" placeholder="Цена до" type="number" min="1" step="1" value={form.price_to} onChange={(e) => setForm({ ...form, price_to: e.target.value === "" ? "" : Number(e.target.value) })} />
+            </div>
+          )}
+        </div>
         <button disabled={loading}>{loading ? "Получаем свежие данные…" : "Найти конкурентов"}</button>
       </form>
 
@@ -315,8 +363,8 @@ export default function App() {
       {result && (
         <>
           <section className="summary">
-            <div><p className="eyebrow">Исходный автомобиль</p><h2>{result.source_vehicle.brand} {result.source_vehicle.model}, {result.source_vehicle.year}</h2><p>{bodyLabels[result.source_vehicle.body_type]} · {transmissionLabels[result.source_vehicle.transmission]} · {regions.find((region) => region.value === result.source_vehicle.region)?.label ?? result.source_vehicle.region} · {rubles.format(result.source_vehicle.price)}</p></div>
-            <div className="statuses">{Object.entries(result.source_status).map(([source, status]) => <span title={result.source_details[source]} className={`status ${status}`} key={source}>{sourceLabels[source] ?? source} — {statusLabels[status] ?? status}</span>)}</div>
+            <div><p className="eyebrow">Исходный автомобиль</p><h2>{result.source_vehicle.brand} {result.source_vehicle.model}, {result.source_vehicle.year_mode === "exact" ? result.source_vehicle.year : `${result.source_vehicle.year_from}–${result.source_vehicle.year_to}`}</h2><p>{bodyLabels[result.source_vehicle.body_type]} · {transmissionLabels[result.source_vehicle.transmission]} · {regions.find((region) => region.value === result.source_vehicle.region)?.label ?? result.source_vehicle.region} · {result.source_vehicle.price_mode === "exact" ? rubles.format(result.source_vehicle.price ?? 0) : `${rubles.format(result.source_vehicle.price_from ?? 0)} — ${rubles.format(result.source_vehicle.price_to ?? 0)}`}</p></div>
+            <div className="statuses">{Object.entries(result.source_status).map(([source, status]) => <span title={result.source_details[source]} className={`status ${status}`} key={source}>{sourceLabels[source] ?? source} — {statusLabels[status] ?? status} · {result.source_distribution[source] ?? 0}</span>)}</div>
           </section>
           {result.warnings.length > 0 && <div className="alert warning"><strong>Часть источников недоступна</strong>{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
           <Category title="Рынок исходной модели" subtitle="Объявления исходной модели" data={result.source_listings} />

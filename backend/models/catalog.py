@@ -69,3 +69,11 @@ class CatalogBrand(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     source_refs: list[SourceReference] = Field(default_factory=list)
     models: list[CatalogModel] = Field(default_factory=list)
+
+
+class CanonicalVehicleIdentity(BaseModel):
+    canonical_brand_id: str
+    canonical_model_id: str
+    brand: str
+    model: str
+    provisional: bool = False

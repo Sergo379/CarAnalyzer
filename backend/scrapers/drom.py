@@ -1,7 +1,8 @@
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -56,23 +57,78 @@ class DromScraper(BaseScraper):
         self.transport = transport
         self.catalog = catalog or CatalogCache()
         self.browser_loader = browser_loader or self._load_in_isolated_browser
+        self._browser_lock = asyncio.Lock()
+        self._browser_error: BrowserAccessLimitedError | None = None
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
-        url = self.build_search_url(query)
+        target_queries = self._target_body_queries(query)
+        diagnostic = self.reset_diagnostics("target", self.build_search_url(target_queries[0]))
+        listings: list[CarListing] = []
+        seen: set[str] = set()
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"},
             follow_redirects=True,
             timeout=self.settings.scraper_timeout_seconds,
             transport=self.transport,
         ) as client:
-            try:
-                response = await client.get(url)
-            except httpx.HTTPError as exc:
-                raise ScraperParseError("Drom request failed") from exc
-        content = await self._content_with_fallback(response, url)
-        return self.parse_search(content, query)
+            for target_query in target_queries:
+                url: str | None = self.build_search_url(target_query)
+                for _ in range(self.settings.scraper_max_pages):
+                    if url is None:
+                        break
+                    try:
+                        response = await client.get(url)
+                    except httpx.HTTPError as exc:
+                        raise ScraperParseError("Drom request failed") from exc
+                    content = await self._content_with_fallback(response, url)
+                    diagnostic.pages_scanned += 1
+                    diagnostic.raw_count += self._card_count(content)
+                    parsed = self.parse_search(
+                        content,
+                        target_query,
+                        body_resolver=lambda subtitle, year: self._catalog_body_type(
+                            query, subtitle, year
+                        ),
+                    )
+                    diagnostic.parsed_count += len(parsed)
+                    new_count = 0
+                    for listing in parsed:
+                        if listing.external_id not in seen:
+                            seen.add(listing.external_id)
+                            listings.append(listing)
+                            new_count += 1
+                            if len(listings) >= self.settings.scraper_max_listings:
+                                diagnostic.accepted_count = len(listings)
+                                return listings
+                    if new_count == 0:
+                        break
+                    url = self._next_page_url(content, str(response.url))
+        diagnostic.accepted_count = len(listings)
+        diagnostic.rejected["filters_or_parse"] = max(
+            0, diagnostic.raw_count - diagnostic.accepted_count
+        )
+        return listings
+
+    def _target_body_queries(self, query: SearchRequest) -> list[SearchRequest]:
+        if query.body_type != BodyFilter.ANY or not hasattr(self.catalog, "generations"):
+            return [query]
+        bodies: set[BodyType] = set()
+        for generation in self.catalog.generations(
+            query.brand,
+            query.model,
+            year_from=query.effective_year_from,
+            year_to=query.effective_year_to,
+        ):
+            bodies.update(BodyType(str(value)) for value in generation.get("body_types", []))
+        if not bodies:
+            return [query]
+        return [
+            query.model_copy(update={"body_type": BodyFilter(body.value)})
+            for body in sorted(bodies, key=str)
+        ]
 
     async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+        diagnostic = self.reset_diagnostics("competitors")
         listings: list[CarListing] = []
         seen: set[str] = set()
         async with httpx.AsyncClient(
@@ -82,18 +138,41 @@ class DromScraper(BaseScraper):
             transport=self.transport,
         ) as client:
             for body_type in sorted(query.body_types, key=str):
-                try:
-                    url = self.build_discovery_url(query, body_type)
-                    response = await client.get(url)
-                except httpx.HTTPError as exc:
-                    raise ScraperParseError("Drom broad request failed") from exc
-                content = await self._content_with_fallback(response, url)
-                for listing in self.parse_discovery(content, body_type):
-                    if listing.external_id in seen:
-                        continue
-                    if query.price_from <= listing.price <= query.price_to:
-                        seen.add(listing.external_id)
-                        listings.append(listing)
+                initial_url = self.build_discovery_url(query, body_type)
+                diagnostic.resolved_url = diagnostic.resolved_url or initial_url
+                url: str | None = initial_url
+                for _ in range(self.settings.scraper_max_pages):
+                    if url is None:
+                        break
+                    try:
+                        response = await client.get(url)
+                    except httpx.HTTPError as exc:
+                        raise ScraperParseError("Drom broad request failed") from exc
+                    content = await self._content_with_fallback(response, url)
+                    diagnostic.pages_scanned += 1
+                    diagnostic.raw_count += self._card_count(content)
+                    parsed = self.parse_discovery(content, body_type)
+                    diagnostic.parsed_count += len(parsed)
+                    new_count = 0
+                    for listing in parsed:
+                        if listing.external_id in seen:
+                            diagnostic.rejected["duplicate"] = (
+                                diagnostic.rejected.get("duplicate", 0) + 1
+                            )
+                            continue
+                        if query.price_from <= listing.price <= query.price_to:
+                            seen.add(listing.external_id)
+                            listings.append(listing)
+                            new_count += 1
+                            if len(listings) >= self.settings.scraper_max_listings:
+                                diagnostic.accepted_count = len(listings)
+                                return listings
+                        else:
+                            diagnostic.rejected["price"] = diagnostic.rejected.get("price", 0) + 1
+                    if new_count == 0:
+                        break
+                    url = self._next_page_url(content, str(response.url))
+        diagnostic.accepted_count = len(listings)
         return listings
 
     @staticmethod
@@ -107,8 +186,13 @@ class DromScraper(BaseScraper):
         )
 
     def build_search_url(self, query: SearchRequest) -> str:
-        identity = Normalizer.vehicle_identity(query.brand, query.model)
-        ref = self.catalog.source_model_ref("drom.ru", identity.brand, identity.family_model)
+        if hasattr(self.catalog, "resolve_identity"):
+            identity = self.catalog.resolve_identity(query.brand, query.model)
+            brand, model = identity.brand, identity.model
+        else:
+            normalized = Normalizer.vehicle_identity(query.brand, query.model)
+            brand, model = normalized.brand, normalized.family_model
+        ref = self.catalog.source_model_ref("drom.ru", brand, model)
         if ref is None:
             raise ScraperParseError(
                 f"Drom catalog has no model path for {query.brand} {query.model}"
@@ -120,14 +204,33 @@ class DromScraper(BaseScraper):
         region = drom_region_prefix(query.region)
         region_query = drom_region_query(query.region)
         body_path = "" if query.body_type == BodyFilter.ANY else f"{query.body_type.value}/"
+        year_path = (
+            f"year-{query.effective_year_from}"
+            if query.effective_year_from == query.effective_year_to
+            else f"year-{query.effective_year_from}-{query.effective_year_to}"
+        )
+        price_from = (
+            query.effective_price_from
+            if query.price_mode.value == "range"
+            else round(query.reference_price * 0.8)
+        )
+        price_to = (
+            query.effective_price_to
+            if query.price_mode.value == "range"
+            else round(query.reference_price * 1.2)
+        )
         return (
-            f"https://auto.drom.ru/{region}{path}/year-{query.year}/used/{body_path}"
-            f"?unsold=1&minprice={round(query.price * 0.8)}"
-            f"&maxprice={round(query.price * 1.2)}{region_query}"
+            f"https://auto.drom.ru/{region}{path}/{year_path}/used/{body_path}"
+            f"?unsold=1&minprice={price_from}&maxprice={price_to}{region_query}"
         )
 
     @classmethod
-    def parse_search(cls, content: bytes, query: SearchRequest) -> list[CarListing]:
+    def parse_search(
+        cls,
+        content: bytes,
+        query: SearchRequest,
+        body_resolver: Callable[[str, int], BodyType | None] | None = None,
+    ) -> list[CarListing]:
         soup = BeautifulSoup(content, "lxml")
         listings: list[CarListing] = []
         seen: set[str] = set()
@@ -148,13 +251,18 @@ class DromScraper(BaseScraper):
             if external_id in seen:
                 continue
             year_match = _YEAR.search(title)
-            if not year_match or int(year_match.group()) != query.year:
+            if not year_match:
+                continue
+            listing_year = int(year_match.group())
+            if not query.effective_year_from <= listing_year <= query.effective_year_to:
                 continue
             price = Normalizer.price(cls._text(card, "bull_price"))
             location = cls._text(card, "bull_location") or None
             technical = cls._technical_metadata(subtitle)
             if query.body_type == BodyFilter.ANY:
                 body_type = Normalizer.body_type_from_text(f"{title} {subtitle}")
+                if body_type is None and body_resolver is not None:
+                    body_type = body_resolver(subtitle, listing_year)
                 if body_type is None:
                     continue
             else:
@@ -170,7 +278,7 @@ class DromScraper(BaseScraper):
                     engine_displacement=technical["engine_displacement"],
                     power_hp=technical["power_hp"],
                     drivetrain=technical["drivetrain"],
-                    year=query.year,
+                    year=listing_year,
                     body_type=body_type,
                     transmission=Normalizer.transmission_from_text(subtitle),
                     price=price,
@@ -185,6 +293,28 @@ class DromScraper(BaseScraper):
             seen.add(external_id)
             listings.append(listing)
         return listings
+
+    def _catalog_body_type(
+        self, query: SearchRequest, modification: str, year: int
+    ) -> BodyType | None:
+        if not hasattr(self.catalog, "generations"):
+            return None
+        generations = self.catalog.generations(query.brand, query.model, year)
+        bodies: set[BodyType] = set()
+        compact_modification = re.sub(r"[^a-zа-яё0-9]", "", modification.casefold())
+        for generation in generations:
+            matched_bodies: set[BodyType] = set()
+            for item in generation.get("modifications", []):
+                name = re.sub(r"[^a-zа-яё0-9]", "", str(item.get("name", "")).casefold())
+                if name and (name in compact_modification or compact_modification in name):
+                    raw_body = item.get("body_type")
+                    if raw_body:
+                        matched_bodies.add(BodyType(str(raw_body)))
+            if matched_bodies:
+                bodies.update(matched_bodies)
+            else:
+                bodies.update(BodyType(str(value)) for value in generation.get("body_types", []))
+        return next(iter(bodies)) if len(bodies) == 1 else None
 
     @classmethod
     def parse_discovery(cls, content: bytes, body_type: BodyType) -> list[CarListing]:
@@ -278,13 +408,29 @@ class DromScraper(BaseScraper):
         except httpx.HTTPStatusError as exc:
             raise ScraperParseError(f"Drom returned HTTP {response.status_code}") from exc
 
+    @staticmethod
+    def _card_count(content: bytes) -> int:
+        return len(BeautifulSoup(content, "lxml").find_all(attrs={"data-ftid": "bulls-list_bull"}))
+
+    @staticmethod
+    def _next_page_url(content: bytes, current_url: str) -> str | None:
+        soup = BeautifulSoup(content, "lxml")
+        link = soup.find("link", rel="next") or soup.find("a", rel="next")
+        if link and isinstance(link.get("href"), str):
+            return urljoin(current_url, str(link["href"]))
+        for anchor in soup.find_all("a", href=True):
+            label = anchor.get_text(" ", strip=True).casefold()
+            if label in {"следующая", "дальше", "next", ">"}:
+                return urljoin(current_url, str(anchor["href"]))
+        return None
+
     async def _content_with_fallback(self, response: httpx.Response, url: str) -> bytes:
         try:
             self._detect_interruption(response)
             return response.content
         except (HttpAutomationLimitedError, Http403Error):
             try:
-                return await self.browser_loader(url)
+                return await self._browser_content(url)
             except CaptchaRequiredError:
                 raise
             except BrowserAccessLimitedError:
@@ -293,6 +439,17 @@ class DromScraper(BaseScraper):
                 raise HttpAutomationLimitedError(
                     "Drom limited direct HTTP and isolated browser fallback failed"
                 ) from exc
+
+    async def _browser_content(self, url: str) -> bytes:
+        """Avoid launching a fresh browser for every URL after an access denial."""
+        async with self._browser_lock:
+            if self._browser_error is not None:
+                raise self._browser_error
+            try:
+                return await self.browser_loader(url)
+            except BrowserAccessLimitedError as exc:
+                self._browser_error = exc
+                raise
 
     async def _load_in_isolated_browser(self, url: str) -> bytes:
         try:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -18,6 +19,7 @@ from backend.scrapers.base import (
     CaptchaRequiredError,
     ScraperParseError,
 )
+from backend.services.marketplace_catalog import CatalogCache
 from backend.services.normalizer import Normalizer
 from backend.services.regions import auto_ru_region_prefix
 
@@ -27,23 +29,8 @@ _LOCATION = re.compile(
     re.IGNORECASE,
 )
 _MODEL_TOKEN = re.compile(r"(?<!\w)(\d{3}[a-zA-Z]{0,3})(?!\w)")
+_YEAR = re.compile(r"\b(19|20)\d{2}\b")
 _URL_IDENTITY = re.compile(r"/sale/([^/]+)/([^/]+)/")
-
-# Only verified SEO paths belong here. Unknown models use the brand-wide endpoint and
-# are filtered by structured listing names instead of guessing an Auto.ru slug.
-_VERIFIED_MODEL_PATHS: dict[tuple[str, str], str] = {
-    ("bmw", "520i"): "bmw/5er-520",
-    ("bmw", "5series"): "bmw/5er",
-    ("bmw", "x5"): "bmw/x5",
-    ("audi", "a6"): "audi/a6",
-    ("mercedes-benz", "eclass"): "mercedes/e_klasse",
-    ("volvo", "s90"): "volvo/s90",
-    ("renault", "captur"): "renault/kaptur",
-    ("renault", "kaptur"): "renault/kaptur",
-    ("ford", "fiesta"): "ford/fiesta",
-    ("toyota", "camry"): "toyota/camry",
-    ("volkswagen", "golf"): "volkswagen/golf",
-}
 
 _AUTO_TRANSMISSIONS: dict[Transmission, str] = {
     Transmission.AUTOMATIC: "AUTOMATIC",
@@ -81,6 +68,12 @@ _BROAD_BODY_PATHS: dict[BodyType, str] = {
 }
 
 
+class _ListingRejected(Exception):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 class AutoRuScraper(BaseScraper):
     source = "auto.ru"
 
@@ -88,12 +81,16 @@ class AutoRuScraper(BaseScraper):
         self,
         settings: Settings | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        catalog: CatalogCache | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
+        self.catalog = catalog or CatalogCache()
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
+        started = time.perf_counter()
         search_url = self.build_search_url(query)
+        diagnostic = self.reset_diagnostics("target", search_url)
         limits = httpx.Limits(
             max_connections=self.settings.scraper_detail_concurrency,
             max_keepalive_connections=self.settings.scraper_detail_concurrency,
@@ -112,28 +109,27 @@ class AutoRuScraper(BaseScraper):
             limits=limits,
             transport=self.transport,
         ) as client:
-            response = await self._get(client, search_url)
-            offers = self.parse_search_offers(response.content)
+            offers = await self._collect_offers(client, search_url, diagnostic)
             if not offers:
-                if not self._has_product_json_ld(response.content):
-                    raise ScraperParseError(
-                        "Auto.ru search response has no server-rendered Product JSON-LD"
-                    )
                 return []
 
+            fast, fallback = self._parse_target_cards(offers, query)
+            diagnostic.parsed_count += len(fast)
             semaphore = asyncio.Semaphore(self.settings.scraper_detail_concurrency)
-            tasks = [
-                self._load_listing(client, semaphore, offer, query)
-                for offer in offers[: self.settings.scraper_max_details]
-            ]
+            diagnostic.detail_requests += len(fallback)
+            tasks = [self._load_listing(client, semaphore, offer, query) for offer in fallback]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         listings: list[CarListing] = []
         source_errors: list[Exception] = []
         seen: set[tuple[str, str]] = set()
-        for result in results:
+        for result in [*fast, *results]:
+            if isinstance(result, _ListingRejected):
+                diagnostic.rejected[result.reason] = diagnostic.rejected.get(result.reason, 0) + 1
+                continue
             if isinstance(result, Exception):
                 source_errors.append(result)
+                diagnostic.rejected["parse"] = diagnostic.rejected.get("parse", 0) + 1
                 continue
             if result is None:
                 continue
@@ -141,6 +137,9 @@ class AutoRuScraper(BaseScraper):
             if key not in seen:
                 seen.add(key)
                 listings.append(result)
+        diagnostic.parsed_count += len(results) - len(source_errors)
+        diagnostic.accepted_count = len(listings)
+        diagnostic.elapsed_seconds = time.perf_counter() - started
 
         if not listings and source_errors:
             interruption = next(
@@ -162,6 +161,8 @@ class AutoRuScraper(BaseScraper):
         return listings
 
     async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+        started = time.perf_counter()
+        diagnostic = self.reset_diagnostics("competitors")
         limits = httpx.Limits(
             max_connections=self.settings.scraper_detail_concurrency,
             max_keepalive_connections=self.settings.scraper_detail_concurrency,
@@ -179,55 +180,288 @@ class AutoRuScraper(BaseScraper):
         ) as client:
             offers: list[dict[str, Any]] = []
             seen_urls: set[str] = set()
-            for body_type in sorted(query.body_types, key=str):
-                response = await self._get(client, self.build_discovery_url(query, body_type))
-                parsed = self.parse_search_offers(response.content)
-                if not parsed and not self._has_product_json_ld(response.content):
-                    raise ScraperParseError(
-                        "Auto.ru broad search has no server-rendered Product JSON-LD"
-                    )
+            body_types: tuple[BodyType | None, ...] = (
+                (None,)
+                if query.body_types == frozenset(BodyType)
+                else tuple(sorted(query.body_types, key=str))
+            )
+            for body_type in body_types:
+                url = self.build_discovery_url(query, body_type)
+                diagnostic.resolved_url = diagnostic.resolved_url or url
+                parsed = await self._collect_offers(client, url, diagnostic)
                 for offer in parsed:
                     url = offer.get("url")
                     if isinstance(url, str) and url not in seen_urls:
                         seen_urls.add(url)
                         offers.append(offer)
 
+            fast, fallback = self._parse_discovery_cards(offers, query)
+            diagnostic.parsed_count += len(fast)
             semaphore = asyncio.Semaphore(self.settings.scraper_detail_concurrency)
+            diagnostic.detail_requests += len(fallback)
             tasks = [
-                self._load_discovered_listing(client, semaphore, offer, query)
-                for offer in offers[: self.settings.scraper_max_details]
+                self._load_discovered_listing(client, semaphore, offer, query) for offer in fallback
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        listings = [result for result in results if isinstance(result, CarListing)]
-        if not listings and results and all(isinstance(result, Exception) for result in results):
-            first = results[0]
-            assert isinstance(first, Exception)
-            raise ScraperParseError("Auto.ru broad result details could not be parsed") from first
+        listings: list[CarListing] = []
+        detail_errors: list[Exception] = []
+        for result in [*fast, *results]:
+            if isinstance(result, _ListingRejected):
+                diagnostic.rejected[result.reason] = diagnostic.rejected.get(result.reason, 0) + 1
+            elif isinstance(result, Exception):
+                detail_errors.append(result)
+            elif isinstance(result, CarListing):
+                listings.append(result)
+        diagnostic.parsed_count += len(results) - len(detail_errors)
+        diagnostic.accepted_count = len(listings)
+        diagnostic.elapsed_seconds = time.perf_counter() - started
+        diagnostic.rejected["parse"] = len(detail_errors)
+        if not listings and detail_errors and len(detail_errors) == len(results):
+            raise ScraperParseError(
+                "Auto.ru broad result details could not be parsed"
+            ) from detail_errors[0]
         return listings
 
-    def build_discovery_url(self, query: MarketDiscoveryRequest, body_type: BodyType) -> str:
-        path = _BROAD_BODY_PATHS[body_type]
+    def build_discovery_url(self, query: MarketDiscoveryRequest, body_type: BodyType | None) -> str:
+        path = f"{_BROAD_BODY_PATHS[body_type]}/" if body_type else ""
         region = auto_ru_region_prefix(query.source_vehicle.region)
         transmission = self._transmission_query(query.source_vehicle.transmission)
         return (
-            f"{self.settings.auto_ru_base_url.rstrip('/')}/{region}cars/used/{path}/"
+            f"{self.settings.auto_ru_base_url.rstrip('/')}/{region}cars/used/{path}"
             f"?price_from={query.price_from}&price_to={query.price_to}{transmission}"
         )
 
     def build_search_url(self, query: SearchRequest) -> str:
-        brand = self._slug(query.brand)
-        model_key = self._model_key(query.modification or query.model)
-        path = _VERIFIED_MODEL_PATHS.get((brand, model_key), brand)
+        identity = self.catalog.resolve_identity(query.brand, query.model)
+        brand = self._slug(identity.brand)
+        ref = self.catalog.source_model_ref("auto.ru", identity.brand, identity.model)
+        path = brand
+        if ref is not None:
+            parts = [part for part in ref.path.split("/") if part]
+            if "cars" in parts:
+                source_parts = parts[parts.index("cars") + 1 :]
+                if source_parts:
+                    path = "/".join(source_parts)
         region = auto_ru_region_prefix(query.region)
         transmission = self._transmission_query(query.transmission)
-        price_from = round(query.price * 0.8)
-        price_to = round(query.price * 1.2)
+        price_from = (
+            query.effective_price_from
+            if query.price_mode.value == "range"
+            else round(query.reference_price * 0.8)
+        )
+        price_to = (
+            query.effective_price_to
+            if query.price_mode.value == "range"
+            else round(query.reference_price * 1.2)
+        )
         return (
             f"{self.settings.auto_ru_base_url.rstrip('/')}/{region}cars/{path}/used/"
-            f"?year_from={query.year}&year_to={query.year}"
+            f"?year_from={query.effective_year_from}&year_to={query.effective_year_to}"
             f"&price_from={price_from}&price_to={price_to}{transmission}"
         )
+
+    async def _collect_offers(
+        self,
+        client: httpx.AsyncClient,
+        initial_url: str,
+        diagnostic,
+    ) -> list[dict[str, Any]]:
+        offers: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        url: str | None = initial_url
+        for _ in range(self.settings.scraper_max_pages):
+            if url is None:
+                break
+            response = await self._get(client, url)
+            diagnostic.pages_scanned += 1
+            parsed = self.parse_search_offers(response.content)
+            self._attach_card_data(parsed, response.content)
+            diagnostic.raw_count += len(parsed)
+            new_count = 0
+            for offer in parsed:
+                offer_url = offer.get("url")
+                if isinstance(offer_url, str) and offer_url not in seen_urls:
+                    seen_urls.add(offer_url)
+                    offers.append(offer)
+                    new_count += 1
+                    if len(offers) >= self.settings.scraper_max_listings:
+                        return offers
+            if not parsed or new_count == 0:
+                break
+            url = self._next_page_url(response.content, str(response.url))
+        return offers
+
+    @classmethod
+    def _attach_card_data(cls, offers: list[dict[str, Any]], content: bytes) -> None:
+        soup = BeautifulSoup(content, "lxml")
+        cards: dict[str, dict[str, str]] = {}
+        for card in soup.find_all(attrs={"data-seo": "listing-item"}):
+            anchor = next(
+                (item for item in card.find_all("a", href=True) if "/sale/" in str(item["href"])),
+                None,
+            )
+            if anchor is None:
+                continue
+            url = str(anchor["href"])
+            address = card.find(class_=lambda value: value and "sellerAddress" in str(value))
+            cards[url] = {
+                "name": anchor.get_text(" ", strip=True),
+                "text": card.get_text(" ", strip=True),
+                "location": address.get_text(" ", strip=True) if address else "",
+            }
+        for offer in offers:
+            url = offer.get("url")
+            if isinstance(url, str) and url in cards:
+                offer.update(cards[url])
+
+    @classmethod
+    def _parse_target_cards(
+        cls, offers: list[dict[str, Any]], query: SearchRequest
+    ) -> tuple[list[CarListing], list[dict[str, Any]]]:
+        accepted: list[CarListing] = []
+        fallback: list[dict[str, Any]] = []
+        for offer in offers:
+            try:
+                listing = cls._listing_from_card(offer, query)
+            except _ListingRejected:
+                continue
+            if listing is None:
+                fallback.append(offer)
+            else:
+                accepted.append(listing)
+        return accepted, fallback
+
+    @classmethod
+    def _parse_discovery_cards(
+        cls, offers: list[dict[str, Any]], query: MarketDiscoveryRequest
+    ) -> tuple[list[CarListing], list[dict[str, Any]]]:
+        accepted: list[CarListing] = []
+        fallback: list[dict[str, Any]] = []
+        for offer in offers:
+            url = offer.get("url")
+            name = str(offer.get("name") or "")
+            text = str(offer.get("text") or "")
+            if not isinstance(url, str) or not name or not text:
+                fallback.append(offer)
+                continue
+            try:
+                match = _URL_IDENTITY.search(urlparse(url).path)
+                if match is None:
+                    raise ValueError
+                identity = Normalizer.marketplace_identity(match.group(1), name, match.group(2))
+                listing = CarListing(
+                    source=cls.source,
+                    external_id=cls._external_id(url),
+                    brand=identity.brand,
+                    model=identity.family_model,
+                    modification=identity.modification,
+                    year=cls._card_year(name),
+                    body_type=cls._body_type(text),
+                    transmission=Normalizer.transmission_from_text(text),
+                    price=offer.get("price"),
+                    url=url,
+                    location=cls._card_location(str(offer.get("location") or "")),
+                    checked_at=datetime.now(UTC),
+                    raw_metadata={"marketplace_name": name},
+                )
+            except (ValueError, ValidationError, ScraperParseError):
+                fallback.append(offer)
+                continue
+            if (
+                listing.body_type not in query.body_types
+                or not query.price_from <= listing.price <= query.price_to
+            ):
+                continue
+            listing.raw_metadata.update(
+                {
+                    "region_scope": query.source_vehicle.region.value,
+                    "region_filter_guaranteed": query.source_vehicle.region.value
+                    != "moscow_oblast",
+                }
+            )
+            accepted.append(listing)
+        return accepted, fallback
+
+    @classmethod
+    def _listing_from_card(cls, offer: dict[str, Any], query: SearchRequest) -> CarListing | None:
+        url = offer.get("url")
+        name = str(offer.get("name") or "")
+        text = str(offer.get("text") or "")
+        if not isinstance(url, str) or not name or not text:
+            return None
+        try:
+            year = cls._card_year(name)
+            body_type = cls._body_type(text)
+            price = int(offer["price"])
+        except (KeyError, TypeError, ValueError, ScraperParseError):
+            return None
+        ref = cls._model_matches(name, query.modification or query.model) or cls._model_matches(
+            name, query.model
+        )
+        if not ref:
+            raise _ListingRejected("model")
+        if not query.effective_year_from <= year <= query.effective_year_to:
+            raise _ListingRejected("year")
+        if not (
+            query.effective_price_from <= price <= query.effective_price_to
+            if query.price_mode.value == "range"
+            else round(query.reference_price * 0.8) <= price <= round(query.reference_price * 1.2)
+        ):
+            raise _ListingRejected("price")
+        transmission = Normalizer.transmission_from_text(text)
+        if query.transmission != Transmission.ANY and transmission != query.transmission:
+            raise _ListingRejected("transmission")
+        location = cls._card_location(str(offer.get("location") or ""))
+        if query.region.value != "any" and location is None:
+            return None
+        return CarListing(
+            source=cls.source,
+            external_id=cls._external_id(url),
+            brand=Normalizer.brand(query.brand),
+            model=Normalizer.model(query.model),
+            modification=name,
+            year=year,
+            body_type=body_type,
+            transmission=transmission,
+            price=price,
+            url=url,
+            location=location,
+            city=location,
+            checked_at=datetime.now(UTC),
+            raw_metadata={
+                "marketplace_name": name,
+                "region_scope": query.region.value,
+                "region_filter_guaranteed": query.region.value != "moscow_oblast",
+            },
+        )
+
+    @staticmethod
+    def _card_year(name: str) -> int:
+        match = _YEAR.search(name)
+        if match is None:
+            raise ValueError("card year missing")
+        return int(match.group())
+
+    @staticmethod
+    def _card_location(value: str) -> str | None:
+        value = Normalizer.text(value)
+        if not value:
+            return None
+        return value.split(",", 1)[0].strip() or None
+
+    @staticmethod
+    def _next_page_url(content: bytes, current_url: str) -> str | None:
+        soup = BeautifulSoup(content, "lxml")
+        link = soup.find("link", rel="next") or soup.find("a", rel="next")
+        if link and isinstance(link.get("href"), str):
+            return urljoin(current_url, link["href"])
+        for anchor in soup.find_all("a", href=True):
+            label = anchor.get_text(" ", strip=True).casefold()
+            aria = str(anchor.get("aria-label", "")).casefold()
+            if label in {"следующая", "дальше", "next", ">"} or "следующ" in aria:
+                return urljoin(current_url, str(anchor["href"]))
+        return None
 
     @staticmethod
     def _transmission_query(transmission: Transmission) -> str:
@@ -296,7 +530,9 @@ class AutoRuScraper(BaseScraper):
             return None
         async with semaphore:
             response = await self._get(client, url)
-        listing = self.parse_detail(response.content, url, query)
+        ref = self.catalog.source_model_ref("auto.ru", query.brand, query.model)
+        aliases = (ref.slug,) if ref is not None and ref.slug else ()
+        listing = self.parse_detail(response.content, url, query, aliases)
         if listing is not None:
             listing.raw_metadata["region_scope"] = query.region.value
             listing.raw_metadata["region_filter_guaranteed"] = query.region.value != "moscow_oblast"
@@ -320,9 +556,9 @@ class AutoRuScraper(BaseScraper):
             query.source_vehicle.region.value != "moscow_oblast"
         )
         if listing.body_type not in query.body_types:
-            return None
+            raise _ListingRejected("body")
         if not query.price_from <= listing.price <= query.price_to:
-            return None
+            raise _ListingRejected("price")
         return listing
 
     @classmethod
@@ -380,6 +616,7 @@ class AutoRuScraper(BaseScraper):
         content: bytes,
         fallback_url: str,
         query: SearchRequest,
+        model_aliases: tuple[str, ...] = (),
     ) -> CarListing | None:
         soup = BeautifulSoup(content, "lxml")
         product = cls._product_json_ld(soup)
@@ -405,11 +642,14 @@ class AutoRuScraper(BaseScraper):
         requested_model = query.modification or query.model
 
         if brand.casefold() != Normalizer.brand(query.brand).casefold():
-            return None
-        if year != query.year:
-            return None
-        if not cls._model_matches(name, requested_model):
-            return None
+            raise _ListingRejected("model")
+        if not query.effective_year_from <= year <= query.effective_year_to:
+            raise _ListingRejected("year")
+        if not any(
+            cls._model_matches(name, candidate)
+            for candidate in (requested_model, query.model, *model_aliases)
+        ):
+            raise _ListingRejected("model")
 
         try:
             return CarListing(
@@ -524,14 +764,13 @@ class AutoRuScraper(BaseScraper):
 
     @staticmethod
     def _model_matches(name: str, model: str) -> bool:
-        compact_name = re.sub(r"[^a-zа-я0-9]", "", name.casefold())
-        compact_model = re.sub(r"[^a-zа-я0-9]", "", model.casefold())
-        if compact_model == "eclass":
-            return "eclass" in compact_name or "eкласс" in compact_name
-        if compact_model == "captur":
-            return "captur" in compact_name or "kaptur" in compact_name
-        if compact_model == "5series":
-            return "5series" in compact_name or "5серии" in compact_name
+        def compact(value: str) -> str:
+            normalized = value.casefold().replace("серии", "series").replace("серия", "series")
+            normalized = normalized.replace("класс", "class")
+            return re.sub(r"[^a-zа-я0-9]", "", normalized)
+
+        compact_name = compact(name)
+        compact_model = compact(model)
         return bool(compact_model) and compact_model in compact_name
 
     @staticmethod

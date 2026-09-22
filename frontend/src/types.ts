@@ -14,15 +14,22 @@ export type BodyFilter = BodyType | "any";
 
 export type Transmission = "any" | "automatic" | "manual" | "robot" | "cvt";
 export type SearchRegion = "any" | "moscow" | "moscow_oblast" | "moscow_and_oblast";
+export type RangeMode = "exact" | "range";
 
 export interface SearchForm {
   brand: string;
   model: string;
+  year_mode: RangeMode;
   year: number | "";
+  year_from: number | "";
+  year_to: number | "";
   body_type: BodyFilter | "";
   transmission: Transmission | "";
   region: SearchRegion;
+  price_mode: RangeMode;
   price: number | "";
+  price_from: number | "";
+  price_to: number | "";
   generation_id: string;
   modification_id: string;
 }
@@ -93,11 +100,17 @@ export interface SearchResult {
   source_vehicle: {
     brand: string;
     model: string;
-    year: number;
+    year_mode: RangeMode;
+    year: number | null;
+    year_from: number | null;
+    year_to: number | null;
     body_type: BodyFilter;
     transmission: Transmission;
     region: SearchRegion;
-    price: number;
+    price_mode: RangeMode;
+    price: number | null;
+    price_from: number | null;
+    price_to: number | null;
     modification: string | null;
     generation: string | null;
     segment: string | null;
@@ -106,6 +119,15 @@ export interface SearchResult {
   source_details: Record<string, string>;
   source_listings: CategoryResult;
   source_model_group: ModelGroup | null;
+  source_distribution: Record<string, number>;
+  source_diagnostics: Record<string, {
+    pages_scanned: number;
+    raw_count: number;
+    parsed_count: number;
+    accepted_count: number;
+    rejected: Record<string, number>;
+    resolved_url: string | null;
+  }>;
   direct: CategoryResult;
   expensive: CategoryResult;
   cheaper: CategoryResult;

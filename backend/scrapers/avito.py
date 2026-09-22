@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -12,6 +13,7 @@ from backend.models.listing import CarListing
 from backend.scrapers.base import (
     AuthenticationRequiredError,
     BaseScraper,
+    BrowserAccessLimitedError,
     CaptchaRequiredError,
     Http403Error,
     Http429Error,
@@ -34,15 +36,24 @@ class AvitoScraper(BaseScraper):
         self,
         settings: Settings | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        browser_checker: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
+        self.browser_checker = browser_checker or self._confirm_rendered_access
         self._browser_lock = asyncio.Lock()
         self._browser_error: ScraperError | None = None
+        self._browser_checked = False
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
-        params = urlencode({"q": f"{query.brand} {query.model} {query.year}"})
+        years = (
+            str(query.effective_year_from)
+            if query.effective_year_from == query.effective_year_to
+            else f"{query.effective_year_from}-{query.effective_year_to}"
+        )
+        params = urlencode({"q": f"{query.brand} {query.model} {years}"})
         url = f"https://www.avito.ru/{self._region_path(query.region)}/avtomobili?{params}"
+        self.reset_diagnostics("target", url)
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"},
             follow_redirects=True,
@@ -54,14 +65,19 @@ class AvitoScraper(BaseScraper):
             except httpx.HTTPError as exc:
                 raise ScraperParseError("Avito request failed") from exc
 
-        self._detect_interruption(response)
-        await self._confirm_rendered_access(url)
+        try:
+            self._detect_interruption(response)
+        except (Http429Error, Http403Error):
+            await self._ensure_browser_checked(url)
+        else:
+            await self._ensure_browser_checked(url)
         raise ScraperParseError("Avito rendered page has no verified listing cards")
 
     async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
         # Only the category route has been observed on this network. Filter parameter
         # names and listing selectors are intentionally not guessed while Avito blocks it.
         url = f"https://www.avito.ru/{self._region_path(query.source_vehicle.region)}/avtomobili"
+        self.reset_diagnostics("competitors", url)
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"},
             follow_redirects=True,
@@ -72,9 +88,26 @@ class AvitoScraper(BaseScraper):
                 response = await client.get(url)
             except httpx.HTTPError as exc:
                 raise ScraperParseError("Avito broad request failed") from exc
-        self._detect_interruption(response)
-        await self._confirm_rendered_access(url)
+        try:
+            self._detect_interruption(response)
+        except (Http429Error, Http403Error):
+            await self._ensure_browser_checked(url)
+        else:
+            await self._ensure_browser_checked(url)
         raise ScraperParseError("Avito rendered broad page has no verified listing cards")
+
+    async def _ensure_browser_checked(self, url: str) -> None:
+        async with self._browser_lock:
+            if self._browser_error is not None:
+                raise self._browser_error
+            if self._browser_checked:
+                return
+            try:
+                await self.browser_checker(url)
+            except ScraperError as exc:
+                self._browser_error = exc
+                raise
+            self._browser_checked = True
 
     @staticmethod
     def _region_path(region: SearchRegion) -> str:
@@ -112,11 +145,11 @@ class AvitoScraper(BaseScraper):
                 self._browser_error = error
                 raise error from exc
             if status == 429 or "проблема с ip" in title:
-                self._browser_error = Http429Error(
+                self._browser_error = BrowserAccessLimitedError(
                     "Avito limited isolated browser access with HTTP 429"
                 )
             elif status == 403:
-                self._browser_error = Http403Error(
+                self._browser_error = BrowserAccessLimitedError(
                     "Avito limited isolated browser access with HTTP 403"
                 )
             elif "captcha" in current_url or "проверка, что вы не робот" in visible:

@@ -7,7 +7,10 @@ from backend.models.listing import ClassifiedListing, ModelGroup
 def group_by_model(items: Iterable[ClassifiedListing]) -> list[ModelGroup]:
     grouped: dict[tuple[str, str], list[ClassifiedListing]] = defaultdict(list)
     for item in items:
-        key = (item.listing.brand.casefold(), item.listing.model.casefold())
+        key = (
+            item.listing.canonical_brand_id or item.listing.brand.casefold(),
+            item.listing.canonical_model_id or item.listing.model.casefold(),
+        )
         grouped[key].append(item)
 
     result: list[ModelGroup] = []
