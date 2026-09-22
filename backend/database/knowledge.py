@@ -31,14 +31,24 @@ class KnowledgeRepository:
         with connect(self.path) as connection:
             yield connection
 
-    def get_profile(self, brand: str, model: str, year: int) -> CarProfile | None:
+    def get_profile(
+        self, brand: str, model: str, year: int, generation: str | None = None
+    ) -> CarProfile | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM car_profiles "
-                "WHERE lower(brand) = lower(?) AND lower(model) = lower(?) AND year = ? "
-                "ORDER BY id LIMIT 1",
-                (brand, model, year),
-            ).fetchone()
+            if generation is None:
+                row = connection.execute(
+                    "SELECT * FROM car_profiles "
+                    "WHERE lower(brand) = lower(?) AND lower(model) = lower(?) AND year = ? "
+                    "ORDER BY id LIMIT 1",
+                    (brand, model, year),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM car_profiles "
+                    "WHERE lower(brand) = lower(?) AND lower(model) = lower(?) "
+                    "AND year = ? AND generation = ? ORDER BY id LIMIT 1",
+                    (brand, model, year, generation),
+                ).fetchone()
         return self._profile(row) if row else None
 
     def upsert_profile(
@@ -78,7 +88,7 @@ class KnowledgeRepository:
                     knowledge_updated_at.isoformat() if knowledge_updated_at else None,
                 ),
             )
-        profile = self.get_profile(brand, model, year)
+        profile = self.get_profile(brand, model, year, generation)
         if profile is None:
             raise RuntimeError("Failed to upsert car profile")
         return profile

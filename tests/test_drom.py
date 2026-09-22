@@ -4,9 +4,21 @@ import httpx
 
 from backend.config import Settings
 from backend.models.car import MarketDiscoveryRequest, SearchRequest
+from backend.models.catalog import SourceReference
 from backend.scrapers.drom import DromScraper
 
 QUERY = SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
+
+
+class FakeCatalog:
+    def source_model_ref(self, source: str, brand: str, model: str) -> SourceReference | None:
+        assert (source, brand, model) == ("drom.ru", "BMW", "5 Series")
+        return SourceReference(
+            source="drom.ru",
+            url="https://www.drom.ru/catalog/bmw/5-series/",
+            path="/catalog/bmw/5-series/",
+            slug="5-series",
+        )
 
 
 def search_html() -> bytes:
@@ -57,7 +69,11 @@ def test_drom_search_uses_verified_path() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=search_html(), request=request)
 
-    scraper = DromScraper(settings=Settings(_env_file=None), transport=httpx.MockTransport(handler))
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
     listings = asyncio.run(scraper.search(QUERY))
     assert len(listings) == 1
     assert scraper.build_search_url(QUERY).endswith(
@@ -99,3 +115,31 @@ def test_drom_combined_region_uses_moscow_distance_query() -> None:
     url = DromScraper.build_discovery_url(discovery, query.body_type)
     assert url.startswith("https://auto.drom.ru/moscow/suv/")
     assert "distance=100" in url
+
+
+def test_drom_http_429_uses_isolated_browser_fallback() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"automation limited", request=request)
+
+    calls: list[str] = []
+
+    async def browser_loader(url: str) -> bytes:
+        calls.append(url)
+        return search_html()
+
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+        browser_loader=browser_loader,
+    )
+    listings = asyncio.run(scraper.search(QUERY))
+    assert len(listings) == 1
+    assert calls == [scraper.build_search_url(QUERY)]
+
+
+def test_drom_any_body_omits_body_path() -> None:
+    query = QUERY.model_copy(update={"body_type": "any"})
+    scraper = DromScraper(catalog=FakeCatalog())  # type: ignore[arg-type]
+    url = scraper.build_search_url(query)
+    assert "/used/?unsold=1" in url

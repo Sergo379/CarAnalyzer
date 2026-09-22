@@ -18,6 +18,21 @@ class BodyType(StrEnum):
     VAN = "van"
 
 
+class BodyFilter(StrEnum):
+    ANY = "any"
+    SEDAN = "sedan"
+    WAGON = "wagon"
+    HATCHBACK = "hatchback"
+    LIFTBACK = "liftback"
+    COUPE = "coupe"
+    CONVERTIBLE = "convertible"
+    SUV = "suv"
+    CROSSOVER = "crossover"
+    PICKUP = "pickup"
+    MINIVAN = "minivan"
+    VAN = "van"
+
+
 class Transmission(StrEnum):
     ANY = "any"
     AUTOMATIC = "automatic"
@@ -60,8 +75,37 @@ class Car(BaseModel):
         return value
 
 
-class SearchRequest(Car):
-    segment: None = None
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    brand: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=120)
+    modification: str | None = Field(default=None, max_length=300)
+    year: int = Field(ge=1900)
+    body_type: BodyFilter = BodyFilter.ANY
+    transmission: Transmission = Transmission.ANY
+    region: SearchRegion = SearchRegion.ANY
+    price: int = Field(gt=0)
+    generation_id: str | None = Field(default=None, max_length=160)
+    modification_id: str | None = Field(default=None, max_length=160)
+
+    @field_validator("brand", "model")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("year")
+    @classmethod
+    def validate_year(cls, value: int) -> int:
+        if value > datetime.now(UTC).year + 1:
+            raise ValueError("year must not exceed next calendar year")
+        return value
+
+
+class SourceVehicle(SearchRequest):
+    segment: str | None = Field(default=None, max_length=80)
+    generation: str | None = Field(default=None, max_length=160)
 
 
 class MarketDiscoveryRequest(BaseModel):

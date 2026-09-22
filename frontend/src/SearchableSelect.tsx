@@ -12,6 +12,9 @@ interface Props {
   onChange: (value: string) => void;
   allowCustom?: boolean;
   required?: boolean;
+  placeholder?: string;
+  disabled?: boolean;
+  allowClear?: boolean;
 }
 
 export function SearchableSelect({
@@ -21,12 +24,16 @@ export function SearchableSelect({
   onChange,
   allowCustom = false,
   required = false,
+  placeholder,
+  disabled = false,
+  allowClear = false,
 }: Props) {
   const id = useId();
   const root = useRef<HTMLLabelElement>(null);
   const selected = options.find((option) => option.value === value);
   const [query, setQuery] = useState(selected?.label ?? value);
   const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
@@ -43,14 +50,22 @@ export function SearchableSelect({
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("ru");
-    if (!needle || selected?.label === query) return options;
-    return options.filter((option) => option.label.toLocaleLowerCase("ru").includes(needle));
-  }, [options, query, selected?.label]);
+    if (!needle || showAll) return options;
+    const matches = options.filter((option) =>
+      option.label.toLocaleLowerCase("ru").includes(needle),
+    );
+    return matches.sort((left, right) => {
+      const leftExact = left.label.toLocaleLowerCase("ru") === needle;
+      const rightExact = right.label.toLocaleLowerCase("ru") === needle;
+      return Number(rightExact) - Number(leftExact);
+    });
+  }, [options, query, showAll]);
 
   function choose(option: SelectOption) {
     onChange(option.value);
     setQuery(option.label);
     setOpen(false);
+    setShowAll(false);
   }
 
   return (
@@ -64,15 +79,18 @@ export function SearchableSelect({
         aria-autocomplete="list"
         autoComplete="off"
         required={required}
+        placeholder={placeholder}
+        disabled={disabled}
         value={query}
-        onFocus={() => { setOpen(true); setActiveIndex(0); }}
-        onClick={() => setOpen(true)}
+        onFocus={() => { setOpen(true); setShowAll(true); setActiveIndex(0); }}
+        onClick={() => { setOpen(true); setShowAll(true); }}
         onChange={(event) => {
           const next = event.target.value;
           setQuery(next);
           setOpen(true);
+          setShowAll(false);
           setActiveIndex(0);
-          if (allowCustom) onChange(next);
+          if (allowCustom || (allowClear && next === "")) onChange(next);
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {

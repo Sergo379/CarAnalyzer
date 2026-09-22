@@ -10,6 +10,7 @@ export type BodyType =
   | "pickup"
   | "minivan"
   | "van";
+export type BodyFilter = BodyType | "any";
 
 export type Transmission = "any" | "automatic" | "manual" | "robot" | "cvt";
 export type SearchRegion = "any" | "moscow" | "moscow_oblast" | "moscow_and_oblast";
@@ -17,11 +18,13 @@ export type SearchRegion = "any" | "moscow" | "moscow_oblast" | "moscow_and_obla
 export interface SearchForm {
   brand: string;
   model: string;
-  year: number;
-  body_type: BodyType;
-  transmission: Transmission;
+  year: number | "";
+  body_type: BodyFilter | "";
+  transmission: Transmission | "";
   region: SearchRegion;
-  price: number;
+  price: number | "";
+  generation_id: string;
+  modification_id: string;
 }
 
 export interface CarListing {
@@ -30,6 +33,12 @@ export interface CarListing {
   brand: string;
   model: string;
   modification: string | null;
+  generation: string | null;
+  fuel_type: string | null;
+  engine_displacement: number | null;
+  power_hp: number | null;
+  engine_code: string | null;
+  drivetrain: string | null;
   year: number;
   body_type: BodyType;
   transmission: Transmission | null;
@@ -81,7 +90,18 @@ export interface ProblemProfile {
 }
 
 export interface SearchResult {
-  source_vehicle: SearchForm & { modification: string | null; segment: string | null };
+  source_vehicle: {
+    brand: string;
+    model: string;
+    year: number;
+    body_type: BodyFilter;
+    transmission: Transmission;
+    region: SearchRegion;
+    price: number;
+    modification: string | null;
+    generation: string | null;
+    segment: string | null;
+  };
   source_status: Record<string, string>;
   source_details: Record<string, string>;
   source_listings: CategoryResult;

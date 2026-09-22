@@ -22,8 +22,9 @@ class CarKnowledgeService:
         year: int,
         body_type: BodyType | None = None,
         segment: str | None = None,
+        generation: str = "",
     ) -> CarKnowledgeResult:
-        profile = self.repository.get_profile(brand, model, year)
+        profile = self.repository.get_profile(brand, model, year, generation)
         if profile is None:
             profile = self.repository.upsert_profile(
                 brand=brand,
@@ -31,6 +32,7 @@ class CarKnowledgeService:
                 year=year,
                 segment=segment,
                 body_types=[body_type] if body_type else [],
+                generation=generation,
             )
         problems = self.repository.get_problem_profile(profile.id)
         if problems is not None and self._fresh(problems.updated_at):

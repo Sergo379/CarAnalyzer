@@ -140,6 +140,16 @@ class Normalizer:
             raise ValueError(f"Unsupported body type: {value!r}") from exc
 
     @staticmethod
+    def body_type_from_text(value: str) -> BodyType | None:
+        folded = value.casefold()
+        for alias, body_type in sorted(
+            _BODY_ALIASES.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", folded):
+                return body_type
+        return None
+
+    @staticmethod
     def transmission(value: str | Transmission) -> Transmission:
         if isinstance(value, Transmission):
             return value

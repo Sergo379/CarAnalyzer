@@ -3,7 +3,7 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { SearchableSelect, type SelectOption } from "./SearchableSelect";
 
 import type {
-  BodyType,
+  BodyFilter,
   CategoryResult,
   ClassifiedListing,
   SearchForm,
@@ -12,7 +12,8 @@ import type {
   Transmission,
 } from "./types";
 
-const bodyLabels: Record<BodyType, string> = {
+const bodyLabels: Record<BodyFilter, string> = {
+  any: "Любой кузов",
   sedan: "Седан",
   wagon: "Универсал",
   hatchback: "Хэтчбек",
@@ -27,14 +28,22 @@ const bodyLabels: Record<BodyType, string> = {
 };
 
 const initialForm: SearchForm = {
-  brand: "BMW",
-  model: "520i",
-  year: 2022,
-  body_type: "sedan",
-  transmission: "any",
+  brand: "",
+  model: "",
+  year: "",
+  body_type: "",
+  transmission: "",
   region: "moscow_and_oblast",
-  price: 4_100_000,
+  price: "",
+  generation_id: "",
+  modification_id: "",
 };
+
+interface CatalogOption {
+  id: string;
+  label: string;
+  name: string;
+}
 
 const transmissionLabels: Record<Transmission, string> = {
   any: "Любая",
@@ -56,8 +65,10 @@ const statusLabels: Record<string, string> = {
   empty: "работает, результатов нет",
   captcha_required: "требуется ручная проверка",
   auth_required: "требуется авторизация",
-  http_429: "временно недоступен (ограничение IP)",
+  http_429: "ограничен автоматический HTTP-доступ",
   http_403: "доступ отклонён площадкой",
+  http_automation_limited: "ограничен автоматический HTTP-доступ",
+  browser_access_limited: "ограничен доступ из изолированного браузера",
   parse_error: "формат страницы не распознан",
   unsupported_query: "запрос не поддерживается",
   robots_restricted: "ограничен правилами площадки",
@@ -145,42 +156,118 @@ export default function App() {
   const [result, setResult] = useState<SearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [vehicleCatalog, setVehicleCatalog] = useState<Record<string, string[]>>({});
+  const [brands, setBrands] = useState<string[]>([]);
+  const [models, setModels] = useState<string[]>([]);
+  const [generations, setGenerations] = useState<CatalogOption[]>([]);
+  const [engines, setEngines] = useState<CatalogOption[]>([]);
   const [regions, setRegions] = useState<SelectOption[]>(fallbackRegions);
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/catalog/vehicles").then((response) => response.json()),
+      fetch("/api/catalog/brands").then((response) => response.json()),
       fetch("/api/catalog/regions").then((response) => response.json()),
-    ]).then(([vehicles, regionData]) => {
-      setVehicleCatalog(Object.fromEntries(
-        (vehicles.brands as { name: string; models: string[] }[])
-          .map((entry) => [entry.name, entry.models]),
-      ));
+    ]).then(([brandData, regionData]) => {
+      setBrands(brandData as string[]);
       setRegions(regionData.regions as SelectOption[]);
     }).catch(() => {
       // Generic manual brand/model entry remains available if reference data is offline.
     });
   }, []);
 
+  useEffect(() => {
+    setModels([]);
+    const brand = form.brand.trim();
+    if (!brand) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      fetch(`/api/catalog/models?brand=${encodeURIComponent(brand)}`, {
+        signal: controller.signal,
+      })
+        .then((response) => response.ok ? response.json() : [])
+        .then((modelData) => setModels(modelData as string[]))
+        .catch((reason: unknown) => {
+          if (!(reason instanceof DOMException && reason.name === "AbortError")) setModels([]);
+        });
+    }, 200);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [form.brand]);
+
+  useEffect(() => {
+    setGenerations([]);
+    setEngines([]);
+    if (!form.brand.trim() || !form.model.trim() || form.year === "") return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({
+      brand: form.brand,
+      model: form.model,
+      year: String(form.year),
+    });
+    fetch(`/api/catalog/generations?${params}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : [])
+      .then((items: CatalogOption[]) => {
+        setGenerations(items);
+        if (items.length === 1) {
+          setForm((current) => ({ ...current, generation_id: items[0].id }));
+        }
+      })
+      .catch(() => setGenerations([]));
+    return () => controller.abort();
+  }, [form.brand, form.model, form.year]);
+
+  useEffect(() => {
+    setEngines([]);
+    if (!form.brand.trim() || !form.model.trim() || form.year === "") return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({
+      brand: form.brand,
+      model: form.model,
+      year: String(form.year),
+    });
+    if (form.generation_id) params.set("generation_id", form.generation_id);
+    fetch(`/api/catalog/engines?${params}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : [])
+      .then((items: CatalogOption[]) => setEngines(items))
+      .catch(() => setEngines([]));
+    return () => controller.abort();
+  }, [form.brand, form.model, form.year, form.generation_id]);
+
   const brandOptions = useMemo(
-    () => Object.keys(vehicleCatalog).map((brand) => ({ value: brand, label: brand })),
-    [vehicleCatalog],
+    () => brands.map((brand) => ({ value: brand, label: brand })),
+    [brands],
   );
   const modelOptions = useMemo(
-    () => (vehicleCatalog[form.brand] ?? []).map((model) => ({ value: model, label: model })),
-    [vehicleCatalog, form.brand],
+    () => models.map((model) => ({ value: model, label: model })),
+    [models],
+  );
+  const generationOptions = useMemo(
+    () => generations.map((item) => ({ value: item.id, label: item.label })),
+    [generations],
+  );
+  const engineOptions = useMemo(
+    () => engines.map((item) => ({ value: item.id, label: item.label })),
+    [engines],
   );
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    setLoading(true);
     setError(null);
+    if (!form.brand.trim()) return setError("Выберите или напишите марку автомобиля.");
+    if (!form.model.trim()) return setError("Выберите или напишите модель автомобиля.");
+    if (form.year === "") return setError("Напишите год выпуска автомобиля.");
+    if (!form.body_type) return setError("Выберите тип кузова.");
+    if (form.price === "") return setError("Напишите цену автомобиля.");
+    setLoading(true);
     try {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          transmission: form.transmission || "any",
+        }),
       });
       if (!response.ok) {
         if (response.status === 502) {
@@ -203,17 +290,24 @@ export default function App() {
         <div><p className="eyebrow">Локальная рыночная аналитика</p><h1>CarAnalyzer</h1><p>Свежие объявления и честное сравнение автомобилей по цене, кузову и сегменту.</p></div>
       </header>
 
-      <form className="search-card" onSubmit={submit}>
-        <SearchableSelect label="Марка" required allowCustom value={form.brand} options={brandOptions} onChange={(brand) => {
-          const compatible = vehicleCatalog[brand] ?? [];
-          setForm({ ...form, brand, model: compatible.includes(form.model) ? form.model : "" });
+      <form className="search-card" onSubmit={submit} noValidate>
+        <SearchableSelect label="Марка" required allowCustom placeholder="Выбрать марку" value={form.brand} options={brandOptions} onChange={(brand) => {
+          setForm({
+            ...form,
+            brand,
+            model: brand === form.brand ? form.model : "",
+            generation_id: "",
+            modification_id: "",
+          });
         }} />
-        <SearchableSelect label="Модель" required allowCustom value={form.model} options={modelOptions} onChange={(model) => setForm({ ...form, model })} />
-        <label>Год<input required type="number" min="1900" max={new Date().getFullYear() + 1} value={form.year} onChange={(e) => setForm({ ...form, year: Number(e.target.value) })} /></label>
-        <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyType })}>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-        <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission })}>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <SearchableSelect label="Модель" required allowCustom disabled={!form.brand.trim()} placeholder="Выбрать модель" value={form.model} options={modelOptions} onChange={(model) => setForm({ ...form, model, generation_id: "", modification_id: "" })} />
+        <label>Год<input required placeholder="Написать год" type="number" min="1900" max={new Date().getFullYear() + 1} value={form.year} onChange={(e) => setForm({ ...form, year: e.target.value === "" ? "" : Number(e.target.value), generation_id: "", modification_id: "" })} /></label>
+        <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || form.year === ""} placeholder="Любое поколение" value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
+        <SearchableSelect label="Двигатель" allowClear disabled={!form.brand.trim() || !form.model.trim() || form.year === ""} placeholder="Любой двигатель" value={form.modification_id} options={engineOptions} onChange={(modification_id) => setForm({ ...form, modification_id })} />
+        <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyFilter | "" })}><option value="" disabled>Выбрать кузов</option>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission | "" })}><option value="" disabled>Тип коробки</option>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
         <SearchableSelect label="Регион поиска" required value={form.region} options={regions} onChange={(region) => setForm({ ...form, region: region as SearchRegion })} />
-        <label>Цена, ₽<input required type="number" min="1" step="1" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} /></label>
+        <label>Цена, ₽<input required placeholder="Написать цену" type="number" min="1" step="1" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value === "" ? "" : Number(e.target.value) })} /></label>
         <button disabled={loading}>{loading ? "Получаем свежие данные…" : "Найти конкурентов"}</button>
       </form>
 

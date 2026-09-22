@@ -66,3 +66,49 @@ def test_vehicle_catalog_models_are_dependent_on_brand() -> None:
     assert "X5" in by_brand["BMW"]
     assert "Camry" not in by_brand["BMW"]
     assert "Captur" in by_brand["Renault"]
+
+
+def test_catalog_exposes_brands_and_models_separately() -> None:
+    with TestClient(app) as client:
+        brands = client.get("/api/catalog/brands")
+        models = client.get("/api/catalog/models", params={"brand": "BMW"})
+        unknown = client.get("/api/catalog/models", params={"brand": "Unlisted handmade car"})
+    assert brands.status_code == 200
+    assert "BMW" in brands.json()
+    assert models.status_code == 200
+    assert "X5" in models.json()
+    assert unknown.json() == []
+
+
+def test_catalog_model_list_has_no_navigation_or_duplicate_bmw_x5() -> None:
+    with TestClient(app) as client:
+        models = client.get("/api/catalog/models", params={"brand": "BMW"}).json()
+    assert "Двигатели BMW" not in models
+    assert "Кузова BMW" not in models
+    assert "BMW X5" not in models
+    assert models.count("X5") == 1
+
+
+def test_catalog_exposes_bmw_x5_generations_and_typed_engines() -> None:
+    with TestClient(app) as client:
+        generations = client.get(
+            "/api/catalog/generations",
+            params={"brand": "BMW", "model": "X5", "year": 2018},
+        ).json()
+        engines = client.get(
+            "/api/catalog/engines",
+            params={
+                "brand": "BMW",
+                "model": "X5",
+                "year": 2018,
+                "generation_id": generations[0]["id"],
+            },
+        ).json()
+    assert {item["name"] for item in generations} == {
+        "G05 · 4 поколение",
+        "F15 · 3 поколение",
+    }
+    diesel = next(item for item in engines if item["engine"]["power_hp"] == 249)
+    assert diesel["engine"]["fuel_type"] == "дизель"
+    assert diesel["engine"]["engine_code"] == "B57D30"
+    assert diesel["source_refs"][0]["path"].startswith("/catalog/bmw/x5/")

@@ -14,7 +14,24 @@ def _read_json(name: str) -> dict[str, Any]:
 
 @lru_cache
 def vehicle_catalog() -> dict[str, Any]:
-    return _read_json("vehicle_catalog.json")
+    payload = _read_json("vehicle_catalog.json")
+    # Preserve the legacy full-catalog endpoint while the primary API serves
+    # brands and models independently. Version 2 stores model provenance.
+    if payload.get("version") in {2, 3}:
+        return {
+            **payload,
+            "brands": [
+                {
+                    "name": entry["name"],
+                    "models": [
+                        model["name"] if isinstance(model, dict) else model
+                        for model in entry["models"]
+                    ],
+                }
+                for entry in payload["brands"]
+            ],
+        }
+    return payload
 
 
 @lru_cache

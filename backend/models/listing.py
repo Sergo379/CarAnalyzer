@@ -21,6 +21,12 @@ class CarListing(BaseModel):
     brand: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
     modification: str | None = Field(default=None, max_length=300)
+    generation: str | None = Field(default=None, max_length=160)
+    fuel_type: str | None = Field(default=None, max_length=40)
+    engine_displacement: float | None = Field(default=None, gt=0)
+    power_hp: int | None = Field(default=None, gt=0)
+    engine_code: str | None = Field(default=None, max_length=80)
+    drivetrain: str | None = Field(default=None, max_length=40)
     year: int = Field(ge=1886, le=2100)
     body_type: BodyType
     transmission: Transmission | None = None

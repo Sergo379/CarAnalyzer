@@ -112,9 +112,13 @@ class AvitoScraper(BaseScraper):
                 self._browser_error = error
                 raise error from exc
             if status == 429 or "проблема с ip" in title:
-                self._browser_error = Http429Error("Avito blocked this IP with HTTP 429")
+                self._browser_error = Http429Error(
+                    "Avito limited isolated browser access with HTTP 429"
+                )
             elif status == 403:
-                self._browser_error = Http403Error("Avito blocked this IP with HTTP 403")
+                self._browser_error = Http403Error(
+                    "Avito limited isolated browser access with HTTP 403"
+                )
             elif "captcha" in current_url or "проверка, что вы не робот" in visible:
                 self._browser_error = CaptchaRequiredError("Avito requires manual CAPTCHA")
             if self._browser_error is not None:
@@ -127,7 +131,7 @@ class AvitoScraper(BaseScraper):
         visible_text = soup.get_text(" ", strip=True).casefold()
         final_url = str(response.url).casefold()
         if response.status_code == 429 or "доступ ограничен" in title:
-            raise Http429Error("Avito rate limit: HTTP 429")
+            raise Http429Error("Avito limited automated HTTP access: HTTP 429")
         if "captcha" in final_url or "проверка, что вы не робот" in visible_text:
             raise CaptchaRequiredError("Avito requires a manual CAPTCHA check")
         if response.status_code == 403:

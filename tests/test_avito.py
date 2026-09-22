@@ -9,7 +9,7 @@ from backend.scrapers.avito import AvitoScraper
 from backend.scrapers.base import Http429Error
 
 
-def test_avito_reports_ip_block_instead_of_empty_results() -> None:
+def test_avito_reports_automation_limit_instead_of_empty_results() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             429,

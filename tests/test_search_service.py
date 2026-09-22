@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from backend.models.car import MarketDiscoveryRequest, SearchRequest
+from backend.models.car import BodyType, MarketDiscoveryRequest, SearchRequest
 from backend.models.listing import CarListing
 from backend.scrapers.base import BaseScraper, Http429Error, SourceBlockedError
 from backend.services.search_service import SearchService, SourceState
@@ -164,6 +164,36 @@ def test_catalog_failure_does_not_break_market_discovery() -> None:
         )
     )
     assert result.source_vehicle.segment is None
+
+
+def test_body_any_discovers_all_types_without_compatibility_filter() -> None:
+    candidate = CarListing(
+        source="broad",
+        external_id="any-body",
+        brand="Toyota",
+        model="RAV4",
+        year=2018,
+        body_type="crossover",
+        price=4_100_000,
+        url="https://example.com/any-body",
+        checked_at=datetime.now(UTC),
+    )
+    scraper = BroadScraper([candidate])
+    result = asyncio.run(
+        SearchService(scrapers=[scraper]).search(
+            SearchRequest(
+                brand="BMW",
+                model="X5",
+                year=2018,
+                body_type="any",
+                price=4_100_000,
+            )
+        )
+    )
+    assert scraper.request is not None
+    assert scraper.request.body_types == frozenset(BodyType)
+    assert result.source_vehicle.body_type == "any"
+    assert result.direct.listings[0].listing.body_type == "crossover"
     assert len(result.direct.listings) == 1
 
 

@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from backend.config import Settings, get_settings
-from backend.models.car import BodyType, Car, PriceRanges
+from backend.models.car import BodyFilter, BodyType, Car, PriceRanges, SourceVehicle
 from backend.models.listing import CarListing, ClassifiedListing, CompetitorGroups
 
 
@@ -70,12 +70,15 @@ class CompetitorEngine:
             return CompetitorCategory.CHEAPER
         return None
 
-    def classify(self, source: Car, listings: Sequence[CarListing]) -> CompetitorGroups:
+    def classify(
+        self, source: Car | SourceVehicle, listings: Sequence[CarListing]
+    ) -> CompetitorGroups:
         groups = CompetitorGroups()
         for listing in listings:
-            if not self.body_is_compatible(
-                source.body_type, listing.body_type
-            ) or not self.segment_is_compatible(source.segment, listing.segment):
+            body_matches = source.body_type == BodyFilter.ANY or self.body_is_compatible(
+                BodyType(source.body_type.value), listing.body_type
+            )
+            if not body_matches or not self.segment_is_compatible(source.segment, listing.segment):
                 continue
             category = self.classify_price(source.price, listing.price)
             if category is None:

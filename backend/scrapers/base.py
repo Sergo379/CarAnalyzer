@@ -28,6 +28,14 @@ class Http403Error(SourceBlockedError):
     """The marketplace denied this request with HTTP 403."""
 
 
+class HttpAutomationLimitedError(SourceBlockedError):
+    """Direct automated HTTP access was limited; this is not proof of an IP ban."""
+
+
+class BrowserAccessLimitedError(SourceBlockedError):
+    """An isolated browser also could not access the marketplace page."""
+
+
 class RobotsRestrictedError(SourceBlockedError):
     """The marketplace explicitly restricts automated read-only access."""
 
