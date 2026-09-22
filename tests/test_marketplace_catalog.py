@@ -154,7 +154,7 @@ def test_failed_sync_preserves_existing_cache() -> None:
     cache_path.unlink()
 
 
-def test_sync_merges_conservative_cross_source_spelling_variants() -> None:
+def test_sync_does_not_merge_one_edit_model_names_without_explicit_alias() -> None:
     cache_path = _cache_path("near-alias.json")
     service = CatalogSyncService(
         sources=[
@@ -165,10 +165,5 @@ def test_sync_merges_conservative_cross_source_spelling_variants() -> None:
     )
     asyncio.run(service.sync())
     entries = CatalogCache(cache_path).model_entries("Example")
-    assert len(entries) == 1
-    assert entries[0]["aliases"] == ["Roadster"]
-    assert {item["source"] for item in entries[0]["source_refs"]} == {
-        "first.test",
-        "second.test",
-    }
+    assert [entry["name"] for entry in entries] == ["Roadstar", "Roadster"]
     cache_path.unlink()

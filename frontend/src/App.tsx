@@ -68,6 +68,7 @@ const fallbackRegions: SelectOption[] = [
 
 const statusLabels: Record<string, string> = {
   ok: "работает",
+  partial: "работает частично",
   empty: "работает, результатов нет",
   captcha_required: "требуется ручная проверка",
   auth_required: "требуется авторизация",

@@ -203,21 +203,6 @@ def _model_key(value: str) -> str:
     return f"{match.group(1)}series" if match else key
 
 
-def _near_alias(left: str, right: str) -> bool:
-    """Conservative one-edit fallback for cross-source spellings of longer model names."""
-    if left == right:
-        return True
-    if min(len(left), len(right)) < 5 or abs(len(left) - len(right)) > 1:
-        return False
-    if len(left) == len(right):
-        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
-    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
-    index = 0
-    while index < len(shorter) and shorter[index] == longer[index]:
-        index += 1
-    return shorter[index:] == longer[index + 1 :]
-
-
 def _source_ref(source: str, url: str) -> SourceReference:
     parsed = urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -372,6 +357,20 @@ class CatalogCache:
                     result.append(modification)
         return result
 
+    def generation(
+        self, brand: str, model: str, generation_id: str | None
+    ) -> dict[str, object] | None:
+        if not generation_id:
+            return None
+        return next(
+            (
+                item
+                for item in self.generations(brand, model)
+                if str(item.get("id")) == generation_id
+            ),
+            None,
+        )
+
     def modification(self, modification_id: str | None) -> dict[str, object] | None:
         if not modification_id:
             return None
@@ -485,10 +484,6 @@ class CatalogSyncService:
                 for source_model in source_brand.models:
                     model_name = _strip_brand_prefix(source_model.name, source_brand.name)
                     key = _model_key(model_name)
-                    key = next(
-                        (known for known in models if _near_alias(known, key)),
-                        key,
-                    )
                     model = models.setdefault(
                         key,
                         CatalogModel(id=f"{brand_key}:{key}", name=model_name, source_refs=[]),

@@ -1,6 +1,7 @@
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
 
@@ -80,7 +81,7 @@ class DromScraper(BaseScraper):
                         response = await client.get(url)
                     except httpx.HTTPError as exc:
                         raise ScraperParseError("Drom request failed") from exc
-                    content = await self._content_with_fallback(response, url)
+                    content = await self._content_with_fallback(response, url, diagnostic)
                     diagnostic.pages_scanned += 1
                     diagnostic.raw_count += self._card_count(content)
                     parsed = self.parse_search(
@@ -148,7 +149,7 @@ class DromScraper(BaseScraper):
                         response = await client.get(url)
                     except httpx.HTTPError as exc:
                         raise ScraperParseError("Drom broad request failed") from exc
-                    content = await self._content_with_fallback(response, url)
+                    content = await self._content_with_fallback(response, url, diagnostic)
                     diagnostic.pages_scanned += 1
                     diagnostic.raw_count += self._card_count(content)
                     parsed = self.parse_discovery(content, body_type)
@@ -424,13 +425,13 @@ class DromScraper(BaseScraper):
                 return urljoin(current_url, str(anchor["href"]))
         return None
 
-    async def _content_with_fallback(self, response: httpx.Response, url: str) -> bytes:
+    async def _content_with_fallback(self, response: httpx.Response, url: str, diagnostic) -> bytes:
         try:
             self._detect_interruption(response)
             return response.content
         except (HttpAutomationLimitedError, Http403Error):
             try:
-                return await self._browser_content(url)
+                return await self._browser_content(url, diagnostic)
             except CaptchaRequiredError:
                 raise
             except BrowserAccessLimitedError:
@@ -440,35 +441,49 @@ class DromScraper(BaseScraper):
                     "Drom limited direct HTTP and isolated browser fallback failed"
                 ) from exc
 
-    async def _browser_content(self, url: str) -> bytes:
+    async def _browser_content(self, url: str, diagnostic) -> bytes:
         """Avoid launching a fresh browser for every URL after an access denial."""
         async with self._browser_lock:
             if self._browser_error is not None:
                 raise self._browser_error
             try:
+                diagnostic.browser_fallbacks += 1
                 return await self.browser_loader(url)
             except BrowserAccessLimitedError as exc:
                 self._browser_error = exc
                 raise
 
     async def _load_in_isolated_browser(self, url: str) -> bytes:
+        browser = None
+        context = None
+        page = None
         try:
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=True)
-                context = await browser.new_context(locale="ru-RU")
-                page = await context.new_page()
-                response = await page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=int(self.settings.scraper_timeout_seconds * 1000),
-                )
-                await page.wait_for_timeout(1_500)
-                title = (await page.title()).casefold()
-                visible = (await page.locator("body").inner_text()).casefold()
-                current_url = page.url.casefold()
-                content = (await page.content()).encode()
-                status = response.status if response else None
-                await browser.close()
+                try:
+                    browser = await playwright.chromium.launch(headless=True)
+                    context = await browser.new_context(locale="ru-RU")
+                    page = await context.new_page()
+                    response = await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=int(self.settings.scraper_timeout_seconds * 1000),
+                    )
+                    await page.wait_for_timeout(1_500)
+                    title = (await page.title()).casefold()
+                    visible = (await page.locator("body").inner_text()).casefold()
+                    current_url = page.url.casefold()
+                    content = (await page.content()).encode()
+                    status = response.status if response else None
+                finally:
+                    if page is not None:
+                        with suppress(PlaywrightError):
+                            await page.close()
+                    if context is not None:
+                        with suppress(PlaywrightError):
+                            await context.close()
+                    if browser is not None:
+                        with suppress(PlaywrightError):
+                            await browser.close()
         except PlaywrightError as exc:
             raise HttpAutomationLimitedError("Drom isolated browser could not start") from exc
         if "captcha" in current_url or "подтвердите, что вы не робот" in visible:

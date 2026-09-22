@@ -134,6 +134,35 @@ def test_source_timeout_keeps_completed_sources() -> None:
     assert result.source_status["auto.ru"] == SourceState.OK
 
 
+def test_source_timeout_preserves_completed_child() -> None:
+    from backend.config import Settings
+
+    class PartialTimeoutScraper(BaseScraper):
+        source = "partial-timeout"
+
+        def __init__(self) -> None:
+            self.settings = Settings(
+                _env_file=None,
+                source_search_timeout_seconds=0.01,
+                search_total_timeout_seconds=0.1,
+            )
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            return [listing(self.source, "target", 4_100_000)]
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            await asyncio.sleep(1)
+            return []
+
+    result = asyncio.run(
+        SearchService(scrapers=[PartialTimeoutScraper()]).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status == {"partial-timeout": SourceState.PARTIAL}
+    assert len(result.source_listings.listings) == 1
+
+
 def test_http_429_has_precise_source_status() -> None:
     result = asyncio.run(
         SearchService(scrapers=[RateLimitedScraper()]).search(
@@ -178,8 +207,8 @@ def test_unknown_ford_uses_broad_price_body_discovery_and_price_700000() -> None
     assert result.source_vehicle.model == "Fiesta"
     assert result.source_vehicle.segment == "passenger_value"
     assert result.direct.listings[0].listing.model == "Yaris"
-    assert "ford:fiesta|2016" in result.car_knowledge
-    assert "toyota:yaris|2017" in result.car_knowledge
+    assert "ford:fiesta" in result.car_knowledge
+    assert "toyota:yaris" in result.car_knowledge
 
 
 def test_catalog_failure_does_not_break_market_discovery() -> None:
@@ -318,3 +347,65 @@ def test_strict_transmission_and_region_exclude_unknown_and_vladivostok() -> Non
         )
     )
     assert [item.listing.external_id for item in result.direct.listings] == ["moscow-auto"]
+
+
+def test_target_success_discovery_failure_preserves_target() -> None:
+    class TargetOnlyScraper(BaseScraper):
+        source = "target-only"
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            return [listing(self.source, "target", 4_100_000)]
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            raise Http429Error("discovery limited")
+
+    result = asyncio.run(
+        SearchService(scrapers=[TargetOnlyScraper()]).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status == {"target-only": SourceState.PARTIAL}
+    assert len(result.source_listings.listings) == 1
+
+
+def test_discovery_success_target_failure_preserves_competitors() -> None:
+    class DiscoveryOnlyScraper(BaseScraper):
+        source = "discovery-only"
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            raise Http429Error("target limited")
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            return [listing(self.source, "competitor", 4_100_000)]
+
+    result = asyncio.run(
+        SearchService(scrapers=[DiscoveryOnlyScraper()]).search(
+            SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status == {"discovery-only": SourceState.PARTIAL}
+    assert len(result.direct.listings) == 1
+
+
+def test_knowledge_is_unique_per_canonical_model() -> None:
+    candidates = [
+        listing("one", "1", 4_100_000),
+        listing("two", "2", 4_100_000),
+    ]
+    result = asyncio.run(
+        SearchService(scrapers=[BroadScraper(candidates)]).search(
+            SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert list(result.car_knowledge).count("audi:a6") == 1
+    assert "bmw:5series" in result.car_knowledge
+    assert len(result.car_knowledge) == 2
+
+
+def test_different_models_keep_different_canonical_ids() -> None:
+    service = SearchService(scrapers=[])
+    ids = {
+        service.marketplace_catalog.resolve_identity(brand, model).canonical_model_id
+        for brand, model in (("Ford", "Fiesta"), ("Volkswagen", "Polo"), ("Skoda", "Fabia"))
+    }
+    assert len(ids) == 3

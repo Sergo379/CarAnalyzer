@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from pydantic import ValidationError
 from backend.models.car import SearchRequest
 from backend.services.competitor_engine import CompetitorEngine
 from backend.services.marketplace_catalog import CatalogCache
-from backend.services.search_service import SearchService
+from backend.services.search_service import InvalidSearchSelection, SearchService
 
 
 def test_exact_and_range_requests_have_stable_reference_values() -> None:
@@ -85,4 +86,102 @@ def test_catalog_generation_range_uses_interval_intersection() -> None:
     assert {
         item["id"] for item in cache.generations("Example", "One", year_from=2018, year_to=2020)
     } == {"old", "new"}
+    path.unlink()
+
+
+def test_selected_generation_clamps_effective_search_years() -> None:
+    path = Path("data/.pytest-selected-generation.json")
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "brands": [
+                    {
+                        "id": "example",
+                        "name": "Example",
+                        "models": [
+                            {
+                                "id": "example:one",
+                                "name": "One",
+                                "generations": [
+                                    {
+                                        "id": "middle",
+                                        "name": "Middle",
+                                        "year_from": 2015,
+                                        "year_to": 2018,
+                                        "modifications": [],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = SearchService(scrapers=[])
+    service.marketplace_catalog = CatalogCache(path)
+    result = asyncio.run(
+        service.search(
+            SearchRequest(
+                brand="Example",
+                model="One",
+                year_mode="range",
+                year_from=2010,
+                year_to=2020,
+                generation_id="middle",
+                price=1_000_000,
+            )
+        )
+    )
+    assert result.source_vehicle.year_from == 2015
+    assert result.source_vehicle.year_to == 2018
+    path.unlink()
+
+
+def test_selected_generation_must_intersect_requested_years() -> None:
+    path = Path("data/.pytest-invalid-generation.json")
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "brands": [
+                    {
+                        "id": "example",
+                        "name": "Example",
+                        "models": [
+                            {
+                                "id": "example:one",
+                                "name": "One",
+                                "generations": [
+                                    {
+                                        "id": "old",
+                                        "name": "Old",
+                                        "year_from": 2000,
+                                        "year_to": 2005,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = SearchService(scrapers=[])
+    service.marketplace_catalog = CatalogCache(path)
+    with pytest.raises(InvalidSearchSelection):
+        asyncio.run(
+            service.search(
+                SearchRequest(
+                    brand="Example",
+                    model="One",
+                    year=2020,
+                    generation_id="old",
+                    price=1_000_000,
+                )
+            )
+        )
     path.unlink()

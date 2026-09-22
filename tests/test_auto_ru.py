@@ -123,6 +123,7 @@ def test_search_uses_structured_data_without_css_selectors() -> None:
     listings = asyncio.run(scraper.search(QUERY))
     assert len(listings) == 1
     assert listings[0].source == "auto.ru"
+    assert scraper.combined_diagnostics().detail_requests == 1
 
 
 def test_search_card_avoids_detail_request_when_required_fields_are_present() -> None:
@@ -139,6 +140,26 @@ def test_search_card_avoids_detail_request_when_required_fields_are_present() ->
     assert [item.external_id for item in listings] == ["1134567890"]
     assert calls == [scraper.build_search_url(QUERY)]
     assert scraper.combined_diagnostics().detail_requests == 0
+
+
+def test_filtered_search_card_does_not_trigger_detail_request() -> None:
+    content = search_card_html().replace(
+        b"BMW 5 \xd1\x81\xd0\xb5\xd1\x80\xd0\xb8\xd0\xb8 520i", b"BMW X5"
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, content=content, request=request)
+
+    scraper = AutoRuScraper(
+        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+    )
+    assert asyncio.run(scraper.search(QUERY)) == []
+    assert calls == [scraper.build_search_url(QUERY)]
+    diagnostic = scraper.combined_diagnostics()
+    assert diagnostic.detail_requests == 0
+    assert diagnostic.rejected["model"] == 1
 
 
 def test_captcha_is_reported_explicitly() -> None:
@@ -171,6 +192,26 @@ def test_broad_search_url_has_only_market_constraints() -> None:
     url = scraper.build_discovery_url(discovery, QUERY.body_type)
     assert url.endswith("/cars/used/body-sedan/?price_from=3280000&price_to=4920000")
     assert "bmw" not in url and "520" not in url
+
+
+def test_discovery_deduplicates_compatible_body_urls() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, content=search_card_html(), request=request)
+
+    scraper = AutoRuScraper(
+        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"hatchback", "liftback"},
+    )
+    asyncio.run(scraper.discover(discovery))
+    assert len(calls) == 1
 
 
 def test_auto_ru_region_and_transmission_are_part_of_search_url() -> None:

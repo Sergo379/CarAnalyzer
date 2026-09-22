@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from urllib.parse import urlencode
 
 import httpx
@@ -53,7 +54,7 @@ class AvitoScraper(BaseScraper):
         )
         params = urlencode({"q": f"{query.brand} {query.model} {years}"})
         url = f"https://www.avito.ru/{self._region_path(query.region)}/avtomobili?{params}"
-        self.reset_diagnostics("target", url)
+        diagnostic = self.reset_diagnostics("target", url)
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"},
             follow_redirects=True,
@@ -68,16 +69,16 @@ class AvitoScraper(BaseScraper):
         try:
             self._detect_interruption(response)
         except (Http429Error, Http403Error):
-            await self._ensure_browser_checked(url)
+            await self._ensure_browser_checked(url, diagnostic)
         else:
-            await self._ensure_browser_checked(url)
+            await self._ensure_browser_checked(url, diagnostic)
         raise ScraperParseError("Avito rendered page has no verified listing cards")
 
     async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
         # Only the category route has been observed on this network. Filter parameter
         # names and listing selectors are intentionally not guessed while Avito blocks it.
         url = f"https://www.avito.ru/{self._region_path(query.source_vehicle.region)}/avtomobili"
-        self.reset_diagnostics("competitors", url)
+        diagnostic = self.reset_diagnostics("competitors", url)
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ru-RU,ru;q=0.9"},
             follow_redirects=True,
@@ -91,18 +92,19 @@ class AvitoScraper(BaseScraper):
         try:
             self._detect_interruption(response)
         except (Http429Error, Http403Error):
-            await self._ensure_browser_checked(url)
+            await self._ensure_browser_checked(url, diagnostic)
         else:
-            await self._ensure_browser_checked(url)
+            await self._ensure_browser_checked(url, diagnostic)
         raise ScraperParseError("Avito rendered broad page has no verified listing cards")
 
-    async def _ensure_browser_checked(self, url: str) -> None:
+    async def _ensure_browser_checked(self, url: str, diagnostic) -> None:
         async with self._browser_lock:
             if self._browser_error is not None:
                 raise self._browser_error
             if self._browser_checked:
                 return
             try:
+                diagnostic.browser_fallbacks += 1
                 await self.browser_checker(url)
             except ScraperError as exc:
                 self._browser_error = exc
@@ -121,11 +123,12 @@ class AvitoScraper(BaseScraper):
 
     async def _confirm_rendered_access(self, url: str) -> None:
         """Use an isolated browser only to distinguish shell/block/CAPTCHA states."""
-        async with self._browser_lock:
-            if self._browser_error is not None:
-                raise self._browser_error
-            try:
-                async with async_playwright() as playwright:
+        browser = None
+        context = None
+        page = None
+        try:
+            async with async_playwright() as playwright:
+                try:
                     browser = await playwright.chromium.launch(headless=True)
                     context = await browser.new_context(locale="ru-RU")
                     page = await context.new_page()
@@ -139,23 +142,24 @@ class AvitoScraper(BaseScraper):
                     current_url = page.url.casefold()
                     visible = (await page.locator("body").inner_text()).casefold()
                     status = response.status if response else None
-                    await browser.close()
-            except PlaywrightError as exc:
-                error = ScraperParseError("Avito isolated browser failed")
-                self._browser_error = error
-                raise error from exc
-            if status == 429 or "проблема с ip" in title:
-                self._browser_error = BrowserAccessLimitedError(
-                    "Avito limited isolated browser access with HTTP 429"
-                )
-            elif status == 403:
-                self._browser_error = BrowserAccessLimitedError(
-                    "Avito limited isolated browser access with HTTP 403"
-                )
-            elif "captcha" in current_url or "проверка, что вы не робот" in visible:
-                self._browser_error = CaptchaRequiredError("Avito requires manual CAPTCHA")
-            if self._browser_error is not None:
-                raise self._browser_error
+                finally:
+                    if page is not None:
+                        with suppress(PlaywrightError):
+                            await page.close()
+                    if context is not None:
+                        with suppress(PlaywrightError):
+                            await context.close()
+                    if browser is not None:
+                        with suppress(PlaywrightError):
+                            await browser.close()
+        except PlaywrightError as exc:
+            raise ScraperParseError("Avito isolated browser failed") from exc
+        if status == 429 or "проблема с ip" in title:
+            raise BrowserAccessLimitedError("Avito limited isolated browser access with HTTP 429")
+        if status == 403:
+            raise BrowserAccessLimitedError("Avito limited isolated browser access with HTTP 403")
+        if "captcha" in current_url or "проверка, что вы не робот" in visible:
+            raise CaptchaRequiredError("Avito requires manual CAPTCHA")
 
     @staticmethod
     def _detect_interruption(response: httpx.Response) -> None:

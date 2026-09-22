@@ -7,7 +7,7 @@ from backend.models.car import SearchRequest
 from backend.models.catalog import VehicleModification
 from backend.services.marketplace_catalog import CatalogCache, CatalogEnrichmentService
 from backend.services.reference_data import regions_catalog, vehicle_catalog
-from backend.services.search_service import SearchResult, SearchService
+from backend.services.search_service import InvalidSearchSelection, SearchResult, SearchService
 
 router = APIRouter(prefix="/api", tags=["search"])
 
@@ -21,7 +21,10 @@ async def search(
     request: SearchRequest,
     service: Annotated[SearchService, Depends(get_search_service)],
 ) -> SearchResult:
-    return await service.search(request)
+    try:
+        return await service.search(request)
+    except InvalidSearchSelection as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/catalog/vehicles")

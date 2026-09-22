@@ -125,9 +125,24 @@ export interface SearchResult {
     raw_count: number;
     parsed_count: number;
     accepted_count: number;
+    detail_requests: number;
+    browser_fallbacks: number;
+    elapsed_seconds: number;
     rejected: Record<string, number>;
     resolved_url: string | null;
   }>;
+  source_operation_diagnostics: Record<string, Record<string, {
+    pages_scanned: number;
+    raw_count: number;
+    parsed_count: number;
+    accepted_count: number;
+    detail_requests: number;
+    browser_fallbacks: number;
+    elapsed_seconds: number;
+    rejected: Record<string, number>;
+    resolved_url: string | null;
+  }>>;
+  pipeline_diagnostics: Record<string, number>;
   direct: CategoryResult;
   expensive: CategoryResult;
   cheaper: CategoryResult;

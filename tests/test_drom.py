@@ -5,6 +5,7 @@ import httpx
 from backend.config import Settings
 from backend.models.car import MarketDiscoveryRequest, SearchRequest
 from backend.models.catalog import CanonicalVehicleIdentity, SourceReference
+from backend.scrapers.base import BrowserAccessLimitedError
 from backend.scrapers.drom import DromScraper
 
 QUERY = SearchRequest(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
@@ -154,6 +155,40 @@ def test_drom_http_429_uses_isolated_browser_fallback() -> None:
     listings = asyncio.run(scraper.search(QUERY))
     assert len(listings) == 1
     assert calls == [scraper.build_search_url(QUERY)]
+
+
+def test_drom_browser_limit_opens_circuit_for_parallel_operations() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"automation limited", request=request)
+
+    calls: list[str] = []
+
+    async def browser_loader(url: str) -> bytes:
+        calls.append(url)
+        raise BrowserAccessLimitedError("browser limited")
+
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+        browser_loader=browser_loader,
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"sedan"},
+    )
+
+    async def run() -> None:
+        results = await asyncio.gather(
+            scraper.search(QUERY), scraper.discover(discovery), return_exceptions=True
+        )
+        assert all(isinstance(value, BrowserAccessLimitedError) for value in results)
+
+    asyncio.run(run())
+    assert len(calls) == 1
+    assert scraper.combined_diagnostics().browser_fallbacks == 1
 
 
 def test_drom_any_body_omits_body_path() -> None:

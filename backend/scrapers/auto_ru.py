@@ -113,7 +113,7 @@ class AutoRuScraper(BaseScraper):
             if not offers:
                 return []
 
-            fast, fallback = self._parse_target_cards(offers, query)
+            fast, fallback = self._parse_target_cards(offers, query, diagnostic)
             diagnostic.parsed_count += len(fast)
             semaphore = asyncio.Semaphore(self.settings.scraper_detail_concurrency)
             diagnostic.detail_requests += len(fallback)
@@ -185,18 +185,24 @@ class AutoRuScraper(BaseScraper):
                 if query.body_types == frozenset(BodyType)
                 else tuple(sorted(query.body_types, key=str))
             )
-            for body_type in body_types:
-                url = self.build_discovery_url(query, body_type)
-                diagnostic.resolved_url = diagnostic.resolved_url or url
-                parsed = await self._collect_offers(client, url, diagnostic)
+            discovery_urls = list(
+                dict.fromkeys(
+                    self.build_discovery_url(query, body_type) for body_type in body_types
+                )
+            )
+            if discovery_urls:
+                diagnostic.resolved_url = discovery_urls[0]
+            batches = await asyncio.gather(
+                *(self._collect_offers(client, url, diagnostic) for url in discovery_urls)
+            )
+            for parsed in batches:
                 for offer in parsed:
                     url = offer.get("url")
                     if isinstance(url, str) and url not in seen_urls:
                         seen_urls.add(url)
                         offers.append(offer)
 
-            fast, fallback = self._parse_discovery_cards(offers, query)
-            diagnostic.parsed_count += len(fast)
+            fast, fallback = self._parse_discovery_cards(offers, query, diagnostic)
             semaphore = asyncio.Semaphore(self.settings.scraper_detail_concurrency)
             diagnostic.detail_requests += len(fallback)
             tasks = [
@@ -317,14 +323,16 @@ class AutoRuScraper(BaseScraper):
 
     @classmethod
     def _parse_target_cards(
-        cls, offers: list[dict[str, Any]], query: SearchRequest
+        cls, offers: list[dict[str, Any]], query: SearchRequest, diagnostic
     ) -> tuple[list[CarListing], list[dict[str, Any]]]:
         accepted: list[CarListing] = []
         fallback: list[dict[str, Any]] = []
         for offer in offers:
             try:
                 listing = cls._listing_from_card(offer, query)
-            except _ListingRejected:
+            except _ListingRejected as exc:
+                diagnostic.parsed_count += 1
+                diagnostic.rejected[exc.reason] = diagnostic.rejected.get(exc.reason, 0) + 1
                 continue
             if listing is None:
                 fallback.append(offer)
@@ -334,7 +342,7 @@ class AutoRuScraper(BaseScraper):
 
     @classmethod
     def _parse_discovery_cards(
-        cls, offers: list[dict[str, Any]], query: MarketDiscoveryRequest
+        cls, offers: list[dict[str, Any]], query: MarketDiscoveryRequest, diagnostic
     ) -> tuple[list[CarListing], list[dict[str, Any]]]:
         accepted: list[CarListing] = []
         fallback: list[dict[str, Any]] = []
@@ -368,10 +376,12 @@ class AutoRuScraper(BaseScraper):
             except (ValueError, ValidationError, ScraperParseError):
                 fallback.append(offer)
                 continue
-            if (
-                listing.body_type not in query.body_types
-                or not query.price_from <= listing.price <= query.price_to
-            ):
+            diagnostic.parsed_count += 1
+            if listing.body_type not in query.body_types:
+                diagnostic.rejected["body"] = diagnostic.rejected.get("body", 0) + 1
+                continue
+            if not query.price_from <= listing.price <= query.price_to:
+                diagnostic.rejected["price"] = diagnostic.rejected.get("price", 0) + 1
                 continue
             listing.raw_metadata.update(
                 {

@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 class SourceState(StrEnum):
     OK = "ok"
+    PARTIAL = "partial"
     EMPTY = "empty"
     CAPTCHA_REQUIRED = "captcha_required"
     AUTH_REQUIRED = "auth_required"
@@ -77,6 +78,10 @@ class SearchResult(BaseModel):
     source_model_group: ModelGroup | None = None
     source_distribution: dict[str, int] = Field(default_factory=dict)
     source_diagnostics: dict[str, SourceDiagnostics] = Field(default_factory=dict)
+    source_operation_diagnostics: dict[str, dict[str, SourceDiagnostics]] = Field(
+        default_factory=dict
+    )
+    pipeline_diagnostics: dict[str, int] = Field(default_factory=dict)
     direct: CategoryResult
     expensive: CategoryResult
     cheaper: CategoryResult
@@ -88,6 +93,10 @@ class SearchResult(BaseModel):
 class MarketplaceOutcome:
     discovered: list[CarListing] | BaseException
     source_listings: list[CarListing] | BaseException
+
+
+class InvalidSearchSelection(ValueError):
+    """A generation/engine selection does not belong to the active model/year window."""
 
 
 class SearchService:
@@ -111,7 +120,43 @@ class SearchService:
     async def search(self, request: SearchRequest) -> SearchResult:
         started = time.perf_counter()
         identity = self.marketplace_catalog.resolve_identity(request.brand, request.model)
-        selected_modification = self.marketplace_catalog.modification(request.modification_id)
+        selected_generation = self.marketplace_catalog.generation(
+            identity.brand, identity.model, request.generation_id
+        )
+        if request.generation_id and selected_generation is None:
+            raise InvalidSearchSelection("Selected generation does not belong to this model")
+        effective_year_from = request.effective_year_from
+        effective_year_to = request.effective_year_to
+        if selected_generation is not None:
+            if selected_generation.get("year_from") is not None:
+                effective_year_from = max(
+                    effective_year_from, int(selected_generation["year_from"])
+                )
+            if selected_generation.get("year_to") is not None:
+                effective_year_to = min(effective_year_to, int(selected_generation["year_to"]))
+            if effective_year_from > effective_year_to:
+                raise InvalidSearchSelection(
+                    "Selected generation does not intersect the requested year range"
+                )
+        allowed_modifications = self.marketplace_catalog.modifications(
+            identity.brand,
+            identity.model,
+            generation_id=request.generation_id,
+            year_from=effective_year_from,
+            year_to=effective_year_to,
+        )
+        selected_modification = next(
+            (
+                item
+                for item in allowed_modifications
+                if str(item.get("id")) == request.modification_id
+            ),
+            None,
+        )
+        if request.modification_id and selected_modification is None:
+            raise InvalidSearchSelection(
+                "Selected engine does not belong to this model/generation/year range"
+            )
         exact_catalog_model = self.marketplace_catalog.model_entry(request.brand, request.model)
         modification = (
             str(selected_modification["name"])
@@ -124,9 +169,9 @@ class SearchService:
             model=identity.model,
             modification=modification,
             year_mode=request.year_mode,
-            year=request.year,
-            year_from=request.year_from,
-            year_to=request.year_to,
+            year=effective_year_from if request.year_mode.value == "exact" else None,
+            year_from=effective_year_from if request.year_mode.value == "range" else None,
+            year_to=effective_year_to if request.year_mode.value == "range" else None,
             body_type=request.body_type,
             transmission=request.transmission,
             region=request.region,
@@ -152,19 +197,7 @@ class SearchService:
             if concrete_body
             else None
         )
-        generation = next(
-            (
-                str(item["name"])
-                for item in self.marketplace_catalog.generations(
-                    normalized.brand,
-                    normalized.model,
-                    year_from=normalized.effective_year_from,
-                    year_to=normalized.effective_year_to,
-                )
-                if item["id"] == normalized.generation_id
-            ),
-            None,
-        )
+        generation = str(selected_generation["name"]) if selected_generation else None
         source = SourceVehicle(
             **normalized.model_dump(),
             segment=source_segment,
@@ -219,6 +252,7 @@ class SearchService:
         target_listings: list[CarListing] = []
         source_distribution: dict[str, int] = {}
         diagnostics: dict[str, SourceDiagnostics] = {}
+        operation_diagnostics: dict[str, dict[str, SourceDiagnostics]] = {}
         for scraper, outcome in zip(self.scrapers, outcomes, strict=True):
             errors = [
                 value
@@ -232,13 +266,14 @@ class SearchService:
             ]
             if successes:
                 count = sum(len(value) for value in successes)
-                statuses[scraper.source] = SourceState.OK if count else SourceState.EMPTY
                 if errors:
+                    statuses[scraper.source] = SourceState.PARTIAL
                     details[scraper.source] = "Источник работает частично"
                     warnings.append(
                         f"{self._display_source(scraper.source)} — источник работает частично"
                     )
                 else:
+                    statuses[scraper.source] = SourceState.OK if count else SourceState.EMPTY
                     details[scraper.source] = (
                         "Работает" if count else "Работает, подходящих объявлений нет"
                     )
@@ -257,6 +292,10 @@ class SearchService:
             else:
                 source_distribution[scraper.source] = 0
             diagnostics[scraper.source] = scraper.combined_diagnostics()
+            operation_diagnostics[scraper.source] = {
+                name: value.model_copy(deep=True)
+                for name, value in getattr(scraper, "diagnostics", {}).items()
+            }
             logger.info(
                 "marketplace source=%s state=%s discovered=%s target=%s errors=%s",
                 scraper.source,
@@ -298,12 +337,30 @@ class SearchService:
             self._classified_item(source.reference_price, listing) for listing in source_unique
         ]
 
-        competitors = []
-        for listing in deduplicate_listings(discovered):
-            if listing.canonical_model_id == source.canonical_model_id:
-                continue
-            if not self._matches_user_filters(listing, normalized):
-                continue
+        deduplicated_discovered = deduplicate_listings(discovered)
+        after_source_exclusion = [
+            listing
+            for listing in deduplicated_discovered
+            if listing.canonical_model_id != source.canonical_model_id
+        ]
+        after_transmission = [
+            listing
+            for listing in after_source_exclusion
+            if normalized.transmission == Transmission.ANY
+            or listing.transmission == normalized.transmission
+        ]
+        after_region = [
+            listing for listing in after_transmission if self._region_matches(listing, normalized)
+        ]
+        after_body = [
+            listing
+            for listing in after_region
+            if normalized.body_type == BodyFilter.ANY
+            or self.engine.body_is_compatible(
+                BodyType(normalized.body_type.value), listing.body_type
+            )
+        ]
+        for listing in after_body:
             listing.segment = self._classify_segment(
                 listing.brand,
                 listing.model,
@@ -311,18 +368,34 @@ class SearchService:
                 listing.body_type,
                 listing.price,
             )
-            competitors.append(listing)
-        groups = self.engine.classify(source, competitors)
+        after_segment = [
+            listing
+            for listing in after_body
+            if self.engine.segment_is_compatible(source.segment, listing.segment)
+        ]
+        after_price = [
+            listing
+            for listing in after_segment
+            if self.engine.classify_price(source.reference_price, listing.price) is not None
+        ]
+        groups = self.engine.classify(source, after_price)
+        pipeline_diagnostics = {
+            "discovered_total": len(discovered),
+            "after_dedup": len(deduplicated_discovered),
+            "after_source_exclusion": len(after_source_exclusion),
+            "after_transmission": len(after_transmission),
+            "after_region": len(after_region),
+            "after_body": len(after_body),
+            "after_segment": len(after_segment),
+            "after_price": len(after_price),
+            "direct": len(groups.direct),
+            "expensive": len(groups.expensive),
+            "cheaper": len(groups.cheaper),
+        }
         categorized = groups.direct + groups.expensive + groups.cheaper
         knowledge: dict[str, dict[str, object]] = {}
-        vehicles = source_unique + [item.listing for item in categorized]
-        source_identity_parts = [source.canonical_model_id]
-        if source.canonical_generation_id:
-            source_identity_parts.append(source.canonical_generation_id)
-        if source.canonical_modification_id:
-            source_identity_parts.append(source.canonical_modification_id)
-        source_identity_parts.append(str(source.reference_year))
-        source_key = "|".join(source_identity_parts)
+        vehicles = [item.listing for item in categorized]
+        source_key = source.canonical_model_id
         knowledge[source_key] = self.knowledge.get(
             source.brand,
             source.model,
@@ -332,14 +405,7 @@ class SearchService:
             generation=source.generation or "",
         ).model_dump(mode="json")
         for vehicle in vehicles:
-            vehicle_key = vehicle.canonical_model_id or f"{vehicle.brand}|{vehicle.model}"
-            vehicle_identity_parts = [vehicle_key]
-            if vehicle.canonical_generation_id:
-                vehicle_identity_parts.append(vehicle.canonical_generation_id)
-            if vehicle.canonical_modification_id:
-                vehicle_identity_parts.append(vehicle.canonical_modification_id)
-            vehicle_identity_parts.append(str(vehicle.year))
-            key = "|".join(vehicle_identity_parts)
+            key = vehicle.canonical_model_id or f"{vehicle.brand}|{vehicle.model}"
             if key in knowledge:
                 continue
             knowledge[key] = self.knowledge.get(
@@ -362,6 +428,8 @@ class SearchService:
             source_model_group=source_groups[0] if source_groups else None,
             source_distribution=source_distribution,
             source_diagnostics=diagnostics if request.debug else {},
+            source_operation_diagnostics=operation_diagnostics if request.debug else {},
+            pipeline_diagnostics=pipeline_diagnostics if request.debug else {},
             direct=CategoryResult(
                 listings=groups.direct, model_groups=group_by_model(groups.direct)
             ),
@@ -381,9 +449,20 @@ class SearchService:
         discovery: MarketDiscoveryRequest,
         source_query: SearchRequest,
     ) -> MarketplaceOutcome:
+        async def measured(operation: str, coroutine):
+            operation_started = time.perf_counter()
+            try:
+                return await coroutine
+            finally:
+                diagnostic = getattr(scraper, "diagnostics", {}).get(operation)
+                if diagnostic is not None:
+                    diagnostic.elapsed_seconds = time.perf_counter() - operation_started
+
         tasks = {
-            "discovered": asyncio.create_task(scraper.discover(discovery)),
-            "source_listings": asyncio.create_task(scraper.search(source_query)),
+            "discovered": asyncio.create_task(measured("competitors", scraper.discover(discovery))),
+            "source_listings": asyncio.create_task(
+                measured("target", scraper.search(source_query))
+            ),
         }
         done, pending = await asyncio.wait(
             tasks.values(), timeout=self._settings().source_search_timeout_seconds
@@ -477,6 +556,15 @@ class SearchService:
     def _matches_user_filters(listing: CarListing, query: SearchRequest) -> bool:
         if query.transmission != Transmission.ANY and listing.transmission != query.transmission:
             return False
+        if (
+            listing.raw_metadata.get("region_filter_guaranteed") is True
+            and listing.raw_metadata.get("region_scope") == query.region.value
+        ):
+            return True
+        return location_matches(query.region, listing.location, listing.city, listing.region)
+
+    @staticmethod
+    def _region_matches(listing: CarListing, query: SearchRequest) -> bool:
         if (
             listing.raw_metadata.get("region_filter_guaranteed") is True
             and listing.raw_metadata.get("region_scope") == query.region.value
@@ -583,6 +671,7 @@ class SearchService:
             SourceState.ROBOTS_RESTRICTED: "ограничен правилами площадки",
             SourceState.PARSE_ERROR: "страница доступна, но формат выдачи не распознан",
             SourceState.BLOCKED: "источник ограничил автоматический доступ",
+            SourceState.PARTIAL: "источник работает частично",
             SourceState.TIMEOUT: "превышен лимит времени источника",
             SourceState.ERROR: "временно недоступен",
         }.get(state, "работает")
