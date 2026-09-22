@@ -34,6 +34,51 @@ CREATE TABLE IF NOT EXISTS searches (
  year INTEGER NOT NULL, body_type TEXT NOT NULL, price INTEGER NOT NULL CHECK (price > 0),
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS car_profiles (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ brand TEXT NOT NULL,
+ model TEXT NOT NULL,
+ year INTEGER NOT NULL,
+ generation TEXT NOT NULL DEFAULT '',
+ segment TEXT,
+ supported_body_types TEXT NOT NULL DEFAULT '[]',
+ technical_summary TEXT,
+ knowledge_updated_at TEXT,
+ UNIQUE (brand, model, year, generation)
+);
+CREATE TABLE IF NOT EXISTS car_problem_profiles (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ car_profile_id INTEGER NOT NULL UNIQUE REFERENCES car_profiles(id) ON DELETE RESTRICT,
+ common_problems TEXT NOT NULL DEFAULT '[]',
+ problematic_components TEXT NOT NULL DEFAULT '[]',
+ inspection_points TEXT NOT NULL DEFAULT '[]',
+ expensive_failures TEXT NOT NULL DEFAULT '[]',
+ risk_summary TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rag_documents (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ car_profile_id INTEGER NOT NULL REFERENCES car_profiles(id) ON DELETE RESTRICT,
+ source_url TEXT NOT NULL,
+ source_title TEXT NOT NULL,
+ fetched_at TEXT NOT NULL,
+ content TEXT NOT NULL,
+ UNIQUE (car_profile_id, source_url)
+);
+CREATE TABLE IF NOT EXISTS rag_chunks (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ document_id INTEGER NOT NULL REFERENCES rag_documents(id) ON DELETE RESTRICT,
+ chunk_index INTEGER NOT NULL,
+ content TEXT NOT NULL,
+ embedding TEXT,
+ UNIQUE (document_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_car_profiles_lookup
+ON car_profiles(brand, model, year);
+CREATE INDEX IF NOT EXISTS idx_rag_documents_profile
+ON rag_documents(car_profile_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_document
+ON rag_chunks(document_id);
 """
 
 

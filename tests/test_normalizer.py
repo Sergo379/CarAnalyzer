@@ -1,6 +1,6 @@
 import pytest
 
-from backend.models.car import BodyType
+from backend.models.car import BodyType, Transmission
 from backend.services.normalizer import Normalizer
 
 
@@ -14,3 +14,16 @@ def test_normalizes_common_values() -> None:
 def test_rejects_unknown_body_type() -> None:
     with pytest.raises(ValueError, match="Unsupported body type"):
         Normalizer.body_type("spaceship")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("АКПП", Transmission.AUTOMATIC),
+        ("MT", Transmission.MANUAL),
+        ("DSG", Transmission.ROBOT),
+        ("Вариатор", Transmission.CVT),
+    ],
+)
+def test_normalizes_transmission(raw: str, expected: Transmission) -> None:
+    assert Normalizer.transmission(raw) == expected

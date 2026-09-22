@@ -20,6 +20,18 @@ def test_price_ranges_and_categories() -> None:
     assert service.classify_price(4_100_000, 2_000_000) is None
 
 
+def test_price_category_boundaries_are_inclusive_and_do_not_overlap() -> None:
+    service = engine()
+    ranges = service.calculate_price_ranges(4_100_000)
+    assert service.classify_price(4_100_000, ranges.direct_min) == CompetitorCategory.DIRECT
+    assert service.classify_price(4_100_000, ranges.direct_max) == CompetitorCategory.DIRECT
+    assert service.classify_price(4_100_000, ranges.expensive_min) == CompetitorCategory.EXPENSIVE
+    assert service.classify_price(4_100_000, ranges.expensive_max) == CompetitorCategory.EXPENSIVE
+    assert service.classify_price(4_100_000, ranges.cheaper_min) == CompetitorCategory.CHEAPER
+    assert service.classify_price(4_100_000, ranges.cheaper_max) == CompetitorCategory.CHEAPER
+    assert service.classify_price(4_100_000, ranges.cheaper_max + 1) is None
+
+
 def test_body_compatibility_is_configured() -> None:
     service = engine()
     assert service.body_is_compatible(BodyType.SEDAN, BodyType.LIFTBACK)

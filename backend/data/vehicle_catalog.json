@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "brands": [
+    {"name": "Audi", "models": ["A1", "A3", "A4", "A5", "A6", "A7", "A8", "Q3", "Q5", "Q7", "Q8"]},
+    {"name": "BMW", "models": ["1 Series", "2 Series", "3 Series", "4 Series", "5 Series", "520i", "7 Series", "8 Series", "X1", "X2", "X3", "X4", "X5", "X6", "X7"]},
+    {"name": "Changan", "models": ["Alsvin", "CS35 Plus", "CS55 Plus", "CS75 Plus", "CS85 Coupe", "CS95", "Uni-K", "Uni-T", "Uni-V"]},
+    {"name": "Chery", "models": ["Arrizo 8", "Tiggo 4", "Tiggo 7 Pro", "Tiggo 8", "Tiggo 8 Pro Max"]},
+    {"name": "Chevrolet", "models": ["Aveo", "Captiva", "Cobalt", "Cruze", "Lacetti", "Niva", "Tahoe"]},
+    {"name": "Citroen", "models": ["C3", "C4", "C5", "C5 Aircross", "Berlingo"]},
+    {"name": "Ford", "models": ["EcoSport", "Explorer", "Fiesta", "Focus", "Fusion", "Kuga", "Mondeo", "Mustang"]},
+    {"name": "Geely", "models": ["Atlas", "Atlas Pro", "Coolray", "Emgrand", "Monjaro", "Okavango", "Tugella"]},
+    {"name": "Haval", "models": ["Dargo", "F7", "F7x", "H5", "H6", "H9", "Jolion", "M6"]},
+    {"name": "Honda", "models": ["Accord", "Civic", "CR-V", "Fit", "HR-V", "Pilot", "Stepwgn"]},
+    {"name": "Hyundai", "models": ["Creta", "Elantra", "Getz", "i30", "Palisade", "Santa Fe", "Solaris", "Sonata", "Tucson"]},
+    {"name": "Kia", "models": ["Carnival", "Ceed", "Cerato", "K5", "Mohave", "Optima", "Rio", "Seltos", "Sorento", "Soul", "Sportage"]},
+    {"name": "Lada", "models": ["Granta", "Largus", "Niva", "Vesta", "XRAY"]},
+    {"name": "Lexus", "models": ["ES", "GS", "GX", "IS", "LS", "LX", "NX", "RX", "UX"]},
+    {"name": "Mazda", "models": ["3", "6", "CX-3", "CX-5", "CX-7", "CX-9"]},
+    {"name": "Mercedes-Benz", "models": ["A-Class", "B-Class", "C-Class", "E-Class", "E 200", "S-Class", "CLA", "CLS", "GLA", "GLC", "GLE", "GLS"]},
+    {"name": "Mitsubishi", "models": ["ASX", "Eclipse Cross", "L200", "Lancer", "Outlander", "Pajero", "Pajero Sport"]},
+    {"name": "Nissan", "models": ["Almera", "Juke", "Murano", "Note", "Pathfinder", "Qashqai", "Teana", "Terrano", "X-Trail"]},
+    {"name": "Opel", "models": ["Antara", "Astra", "Corsa", "Insignia", "Mokka", "Zafira"]},
+    {"name": "Peugeot", "models": ["206", "207", "208", "3008", "308", "408", "5008", "Partner"]},
+    {"name": "Renault", "models": ["Arkana", "Captur", "Kaptur", "Clio", "Duster", "Fluence", "Logan", "Megane", "Sandero", "Scenic"]},
+    {"name": "Skoda", "models": ["Fabia", "Karoq", "Kodiaq", "Octavia", "Rapid", "Superb", "Yeti"]},
+    {"name": "Subaru", "models": ["Forester", "Impreza", "Legacy", "Outback", "Tribeca", "XV"]},
+    {"name": "Suzuki", "models": ["Grand Vitara", "Jimny", "Swift", "SX4", "Vitara"]},
+    {"name": "Toyota", "models": ["Alphard", "Auris", "Avensis", "Camry", "Corolla", "C-HR", "Highlander", "Land Cruiser", "Prius", "RAV4", "Yaris"]},
+    {"name": "Volkswagen", "models": ["Amarok", "Caddy", "Golf", "Jetta", "Passat", "Polo", "Taos", "Tiguan", "Touareg", "Touran"]},
+    {"name": "Volvo", "models": ["S60", "S80", "S90", "V60", "V90", "XC40", "XC60", "XC90"]}
+  ]
+}

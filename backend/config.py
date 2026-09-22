@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     expensive_max_percent: float = Field(default=0.20, gt=0, lt=1)
     cheaper_min_percent: float = Field(default=0.10, ge=0, lt=1)
     cheaper_max_percent: float = Field(default=0.20, gt=0, lt=1)
+    auto_ru_base_url: str = "https://auto.ru"
+    scraper_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    scraper_detail_concurrency: int = Field(default=4, ge=1, le=10)
+    scraper_max_details: int = Field(default=40, ge=1, le=100)
+    car_knowledge_ttl_days: int = Field(default=90, ge=1, le=3650)
 
     @model_validator(mode="after")
     def validate_price_thresholds(self) -> "Settings":

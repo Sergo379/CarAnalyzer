@@ -1,34 +1,31 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+from typing import Annotated
 
-from backend.models.car import PriceRanges, SearchRequest
-from backend.models.listing import CompetitorGroups
-from backend.services.competitor_engine import CompetitorEngine
-from backend.services.normalizer import Normalizer
+from fastapi import APIRouter, Depends
+
+from backend.models.car import SearchRequest
+from backend.services.reference_data import regions_catalog, vehicle_catalog
+from backend.services.search_service import SearchResult, SearchService
 
 router = APIRouter(prefix="/api", tags=["search"])
 
 
-class SearchResponse(BaseModel):
-    query: SearchRequest
-    price_ranges: PriceRanges
-    competitors: CompetitorGroups
-    source_status: str
+def get_search_service() -> SearchService:
+    return SearchService()
 
 
-@router.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest) -> SearchResponse:
-    normalized = SearchRequest(
-        brand=Normalizer.brand(request.brand),
-        model=Normalizer.model(request.model),
-        year=request.year,
-        body_type=request.body_type,
-        price=request.price,
-    )
-    engine = CompetitorEngine()
-    return SearchResponse(
-        query=normalized,
-        price_ranges=engine.calculate_price_ranges(normalized.price),
-        competitors=CompetitorGroups(),
-        source_status="foundation_ready_auto_ru_not_connected",
-    )
+@router.post("/search", response_model=SearchResult)
+async def search(
+    request: SearchRequest,
+    service: Annotated[SearchService, Depends(get_search_service)],
+) -> SearchResult:
+    return await service.search(request)
+
+
+@router.get("/catalog/vehicles")
+async def catalog_vehicles() -> dict[str, object]:
+    return vehicle_catalog()
+
+
+@router.get("/catalog/regions")
+async def catalog_regions() -> dict[str, object]:
+    return regions_catalog()

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "regions": [
+    {"value": "any", "label": "Любой регион"},
+    {"value": "moscow", "label": "Москва"},
+    {"value": "moscow_oblast", "label": "Московская область"},
+    {"value": "moscow_and_oblast", "label": "Москва и Московская область"}
+  ]
+}
