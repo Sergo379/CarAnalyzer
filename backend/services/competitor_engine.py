@@ -54,11 +54,9 @@ class CompetitorEngine:
 
     @staticmethod
     def segment_is_compatible(source: str | None, candidate: str | None) -> bool:
-        return (
-            source is None
-            or candidate is None
-            or source.strip().casefold() == candidate.strip().casefold()
-        )
+        if source is None or candidate is None:
+            return False
+        return source.strip().casefold() == candidate.strip().casefold()
 
     def classify_price(self, source_price: int, candidate_price: int) -> CompetitorCategory | None:
         ranges = self.calculate_price_ranges(source_price)

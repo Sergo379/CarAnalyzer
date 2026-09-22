@@ -1,81 +1,51 @@
 from backend.models.car import SearchRegion
-
-MOSCOW_OBLAST_CITIES = frozenset(
-    {
-        "балашиха",
-        "видное",
-        "воскресенск",
-        "дмитров",
-        "долгопрудный",
-        "домодедово",
-        "дубна",
-        "егорьевск",
-        "железнодорожный",
-        "жуковский",
-        "зеленоград",
-        "истра",
-        "клин",
-        "коломна",
-        "королёв",
-        "котельники",
-        "красногорск",
-        "лобня",
-        "люберцы",
-        "мытищи",
-        "ногинск",
-        "одинцово",
-        "орехово-зуево",
-        "подольск",
-        "пушкино",
-        "раменское",
-        "реутов",
-        "сергиев посад",
-        "серпухов",
-        "солнечногорск",
-        "ступино",
-        "химки",
-        "чехов",
-        "щёлково",
-        "электросталь",
-    }
-)
+from backend.services.reference_data import regions_catalog
 
 
-def auto_ru_region_prefix(region: SearchRegion) -> str:
-    if region == SearchRegion.MOSCOW:
-        return "moskva/"
-    if region in {SearchRegion.MOSCOW_OBLAST, SearchRegion.MOSCOW_AND_OBLAST}:
-        # Auto.ru's observed region page explicitly covers Moscow + Moscow Oblast.
-        return "moskovskaya_oblast/"
-    return ""
+def region_value(region: str | SearchRegion) -> str:
+    return region.value if isinstance(region, SearchRegion) else region
 
 
-def drom_region_prefix(region: SearchRegion) -> str:
-    return "moscow/" if region != SearchRegion.ANY else ""
+def region_entry(region: str | SearchRegion) -> dict[str, object] | None:
+    selected = region_value(region)
+    return next(
+        (item for item in regions_catalog().get("regions", []) if item["value"] == selected),
+        None,
+    )
 
 
-def drom_region_query(region: SearchRegion) -> str:
-    if region in {SearchRegion.MOSCOW_OBLAST, SearchRegion.MOSCOW_AND_OBLAST}:
-        return "&distance=100"
-    return ""
+def auto_ru_region_prefix(region: str | SearchRegion) -> str:
+    entry = region_entry(region)
+    path = entry.get("auto_ru_path") if entry else None
+    return f"{path.strip('/')}/" if isinstance(path, str) and path else ""
+
+
+def drom_region_prefix(region: str | SearchRegion) -> str:
+    entry = region_entry(region)
+    path = entry.get("drom_path") if entry else None
+    return f"{path.strip('/')}/" if isinstance(path, str) and path else ""
+
+
+def drom_region_query(region: str | SearchRegion) -> str:
+    entry = region_entry(region)
+    value = entry.get("drom_query") if entry else None
+    return f"&{value}" if isinstance(value, str) and value else ""
 
 
 def location_matches(
-    selected: SearchRegion,
+    selected: str | SearchRegion,
     location: str | None,
     city: str | None = None,
     region: str | None = None,
 ) -> bool:
-    if selected == SearchRegion.ANY:
+    selected_value = region_value(selected)
+    if selected_value == SearchRegion.ANY.value:
         return True
+    entry = region_entry(selected_value)
+    if entry is None:
+        return False
     folded = " ".join(value for value in (location, city, region) if value).casefold()
     if not folded:
         return False
-    is_oblast = "московск" in folded and "област" in folded
-    is_moscow = ("москва" in folded or "москве" in folded) and not is_oblast
-    is_oblast_city = any(name in folded for name in MOSCOW_OBLAST_CITIES)
-    if selected == SearchRegion.MOSCOW:
-        return is_moscow
-    if selected == SearchRegion.MOSCOW_OBLAST:
-        return (is_oblast or is_oblast_city) and not is_moscow
-    return is_moscow or is_oblast or is_oblast_city
+    aliases = [str(entry.get("label", "")), *(str(x) for x in entry.get("aliases", []))]
+    return any(alias.casefold() in folded for alias in aliases if alias)

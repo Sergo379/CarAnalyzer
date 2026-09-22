@@ -47,7 +47,7 @@ from backend.services.deduplication import deduplicate_listings
 from backend.services.grouping import group_by_model
 from backend.services.knowledge import CarKnowledgeService
 from backend.services.marketplace_catalog import CatalogCache
-from backend.services.regions import location_matches
+from backend.services.regions import location_matches, region_entry, region_value
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ class SearchResult(BaseModel):
     source_operation_diagnostics: dict[str, dict[str, SourceDiagnostics]] = Field(
         default_factory=dict
     )
+    source_operations: dict[str, dict[str, "SourceOperationResult"]] = Field(default_factory=dict)
     pipeline_diagnostics: dict[str, int] = Field(default_factory=dict)
     direct: CategoryResult
     expensive: CategoryResult
@@ -93,6 +94,13 @@ class SearchResult(BaseModel):
 class MarketplaceOutcome:
     discovered: list[CarListing] | BaseException
     source_listings: list[CarListing] | BaseException
+
+
+class SourceOperationResult(BaseModel):
+    state: SourceState
+    count: int = Field(ge=0)
+    detail: str
+    elapsed_seconds: float = Field(ge=0)
 
 
 class InvalidSearchSelection(ValueError):
@@ -118,7 +126,8 @@ class SearchService:
         self.marketplace_catalog = CatalogCache()
 
     async def search(self, request: SearchRequest) -> SearchResult:
-        started = time.perf_counter()
+        if region_entry(request.region) is None:
+            raise InvalidSearchSelection("Selected region is not present in the region catalog")
         identity = self.marketplace_catalog.resolve_identity(request.brand, request.model)
         selected_generation = self.marketplace_catalog.generation(
             identity.brand, identity.model, request.generation_id
@@ -138,31 +147,28 @@ class SearchService:
                 raise InvalidSearchSelection(
                     "Selected generation does not intersect the requested year range"
                 )
-        allowed_modifications = self.marketplace_catalog.modifications(
+        selected_engine = self.marketplace_catalog.engine_option(
             identity.brand,
             identity.model,
+            request.modification_id,
             generation_id=request.generation_id,
             year_from=effective_year_from,
             year_to=effective_year_to,
         )
-        selected_modification = next(
-            (
-                item
-                for item in allowed_modifications
-                if str(item.get("id")) == request.modification_id
-            ),
-            None,
-        )
-        if request.modification_id and selected_modification is None:
+        if request.modification_id and selected_engine is None:
             raise InvalidSearchSelection(
                 "Selected engine does not belong to this model/generation/year range"
             )
-        exact_catalog_model = self.marketplace_catalog.model_entry(request.brand, request.model)
         modification = (
-            str(selected_modification["name"])
-            if selected_modification
+            str(selected_engine["label"])
+            if selected_engine
             else request.modification
-            or (request.model if exact_catalog_model is None and not identity.provisional else None)
+            or (
+                request.model
+                if re.fullmatch(r"[1-9]\d{2}[a-z]*", request.model.casefold())
+                and not identity.provisional
+                else None
+            )
         )
         normalized = SearchRequest(
             brand=identity.brand,
@@ -186,16 +192,11 @@ class SearchService:
         concrete_body = (
             None if normalized.body_type == BodyFilter.ANY else BodyType(normalized.body_type.value)
         )
-        source_segment = (
-            self._classify_segment(
-                normalized.brand,
-                normalized.model,
-                normalized.reference_year,
-                concrete_body,
-                normalized.reference_price,
-            )
-            if concrete_body
-            else None
+        source_segment = self._classify_segment(
+            normalized.brand,
+            normalized.model,
+            normalized.reference_year,
+            concrete_body,
         )
         generation = str(selected_generation["name"]) if selected_generation else None
         source = SourceVehicle(
@@ -253,7 +254,22 @@ class SearchService:
         source_distribution: dict[str, int] = {}
         diagnostics: dict[str, SourceDiagnostics] = {}
         operation_diagnostics: dict[str, dict[str, SourceDiagnostics]] = {}
+        source_operations: dict[str, dict[str, SourceOperationResult]] = {}
         for scraper, outcome in zip(self.scrapers, outcomes, strict=True):
+            scraper_operation_diagnostics = {
+                name: value.model_copy(deep=True)
+                for name, value in getattr(scraper, "diagnostics", {}).items()
+            }
+            source_operations[scraper.source] = {
+                "target": self._operation_result(
+                    outcome.source_listings,
+                    scraper_operation_diagnostics.get("target"),
+                ),
+                "competitors": self._operation_result(
+                    outcome.discovered,
+                    scraper_operation_diagnostics.get("competitors"),
+                ),
+            }
             errors = [
                 value
                 for value in (outcome.discovered, outcome.source_listings)
@@ -266,9 +282,12 @@ class SearchService:
             ]
             if successes:
                 count = sum(len(value) for value in successes)
-                if errors:
+                combined = scraper.combined_diagnostics()
+                if errors or combined.degraded:
                     statuses[scraper.source] = SourceState.PARTIAL
-                    details[scraper.source] = "Источник работает частично"
+                    details[scraper.source] = (
+                        "; ".join(combined.notes) or "Источник работает частично"
+                    )
                     warnings.append(
                         f"{self._display_source(scraper.source)} — источник работает частично"
                     )
@@ -292,10 +311,7 @@ class SearchService:
             else:
                 source_distribution[scraper.source] = 0
             diagnostics[scraper.source] = scraper.combined_diagnostics()
-            operation_diagnostics[scraper.source] = {
-                name: value.model_copy(deep=True)
-                for name, value in getattr(scraper, "diagnostics", {}).items()
-            }
+            operation_diagnostics[scraper.source] = scraper_operation_diagnostics
             logger.info(
                 "marketplace source=%s state=%s discovered=%s target=%s errors=%s",
                 scraper.source,
@@ -304,9 +320,6 @@ class SearchService:
                 len(outcome.source_listings) if isinstance(outcome.source_listings, list) else 0,
                 ",".join(type(error).__name__ for error in errors) or "none",
             )
-        for value in diagnostics.values():
-            value.elapsed_seconds = max(value.elapsed_seconds, time.perf_counter() - started)
-
         for listing in target_listings + discovered:
             self._attach_canonical_identity(listing)
 
@@ -336,6 +349,19 @@ class SearchService:
         source_items = [
             self._classified_item(source.reference_price, listing) for listing in source_unique
         ]
+        if source.segment is None:
+            observed_segments = {
+                self._classify_segment(
+                    listing.brand,
+                    listing.model,
+                    listing.year,
+                    listing.body_type,
+                )
+                for listing in source_unique
+            }
+            observed_segments.discard(None)
+            if len(observed_segments) == 1:
+                source.segment = next(iter(observed_segments))
 
         deduplicated_discovered = deduplicate_listings(discovered)
         after_source_exclusion = [
@@ -366,7 +392,6 @@ class SearchService:
                 listing.model,
                 listing.year,
                 listing.body_type,
-                listing.price,
             )
         after_segment = [
             listing
@@ -429,6 +454,7 @@ class SearchService:
             source_distribution=source_distribution,
             source_diagnostics=diagnostics if request.debug else {},
             source_operation_diagnostics=operation_diagnostics if request.debug else {},
+            source_operations=source_operations,
             pipeline_diagnostics=pipeline_diagnostics if request.debug else {},
             direct=CategoryResult(
                 listings=groups.direct, model_groups=group_by_model(groups.direct)
@@ -452,7 +478,13 @@ class SearchService:
         async def measured(operation: str, coroutine):
             operation_started = time.perf_counter()
             try:
-                return await coroutine
+                budget = (
+                    self._settings().target_operation_timeout_seconds
+                    if operation == "target"
+                    else self._settings().discovery_operation_timeout_seconds
+                )
+                budget = min(budget, self._settings().source_search_timeout_seconds)
+                return await asyncio.wait_for(coroutine, timeout=budget)
             finally:
                 diagnostic = getattr(scraper, "diagnostics", {}).get(operation)
                 if diagnostic is not None:
@@ -484,6 +516,37 @@ class SearchService:
         source_listings = values["source_listings"]
         return MarketplaceOutcome(discovered=discovered, source_listings=source_listings)
 
+    def _operation_result(
+        self,
+        value: list[CarListing] | BaseException,
+        diagnostic: SourceDiagnostics | None,
+    ) -> SourceOperationResult:
+        elapsed = diagnostic.elapsed_seconds if diagnostic is not None else 0
+        if isinstance(value, list):
+            state = SourceState.OK if value else SourceState.EMPTY
+            if diagnostic is not None and diagnostic.degraded:
+                state = SourceState.PARTIAL
+            detail = (
+                "; ".join(diagnostic.notes)
+                if diagnostic is not None and diagnostic.notes
+                else "Работает"
+                if value
+                else "Подходящих объявлений нет"
+            )
+            return SourceOperationResult(
+                state=state,
+                count=len(value),
+                detail=detail,
+                elapsed_seconds=elapsed,
+            )
+        state = self._state_for_error(value)
+        return SourceOperationResult(
+            state=state,
+            count=0,
+            detail=self._message_for_state(state),
+            elapsed_seconds=elapsed,
+        )
+
     def _settings(self) -> Settings:
         if self.scrapers:
             value = getattr(self.scrapers[0], "settings", None)
@@ -507,10 +570,9 @@ class SearchService:
         if query.transmission != Transmission.ANY and listing.transmission != query.transmission:
             return "transmission"
         if not location_matches(query.region, listing.location, listing.city, listing.region):
-            guaranteed = (
-                listing.raw_metadata.get("region_filter_guaranteed") is True
-                and listing.raw_metadata.get("region_scope") == query.region.value
-            )
+            guaranteed = listing.raw_metadata.get(
+                "region_filter_guaranteed"
+            ) is True and listing.raw_metadata.get("region_scope") == region_value(query.region)
             if not guaranteed:
                 return "region"
         if (
@@ -519,11 +581,7 @@ class SearchService:
             and listing.canonical_generation_id != query.generation_id
         ):
             return "generation"
-        if (
-            query.modification_id
-            and listing.modification
-            and not self._same_modification(listing.modification, query.modification or "")
-        ):
+        if query.modification_id and not self._engine_matches_listing(listing, query):
             return "engine"
         return None
 
@@ -556,19 +614,17 @@ class SearchService:
     def _matches_user_filters(listing: CarListing, query: SearchRequest) -> bool:
         if query.transmission != Transmission.ANY and listing.transmission != query.transmission:
             return False
-        if (
-            listing.raw_metadata.get("region_filter_guaranteed") is True
-            and listing.raw_metadata.get("region_scope") == query.region.value
-        ):
+        if listing.raw_metadata.get(
+            "region_filter_guaranteed"
+        ) is True and listing.raw_metadata.get("region_scope") == region_value(query.region):
             return True
         return location_matches(query.region, listing.location, listing.city, listing.region)
 
     @staticmethod
     def _region_matches(listing: CarListing, query: SearchRequest) -> bool:
-        if (
-            listing.raw_metadata.get("region_filter_guaranteed") is True
-            and listing.raw_metadata.get("region_scope") == query.region.value
-        ):
+        if listing.raw_metadata.get(
+            "region_filter_guaranteed"
+        ) is True and listing.raw_metadata.get("region_scope") == region_value(query.region):
             return True
         return location_matches(query.region, listing.location, listing.city, listing.region)
 
@@ -587,6 +643,34 @@ class SearchService:
         needle = compact(requested.split(" AT ", 1)[0])
         return bool(needle) and needle in compact(listing_value)
 
+    def _engine_matches_listing(self, listing: CarListing, query: SearchRequest) -> bool:
+        option = self.marketplace_catalog.engine_option(
+            query.brand,
+            query.model,
+            query.modification_id,
+            generation_id=query.generation_id,
+            year_from=query.effective_year_from,
+            year_to=query.effective_year_to,
+        )
+        if option is None:
+            return False
+        engine = option.get("engine") or {}
+        checks = (
+            ("fuel_type", listing.fuel_type),
+            ("displacement_l", listing.engine_displacement),
+            ("power_hp", listing.power_hp),
+            ("engine_code", listing.engine_code),
+        )
+        compared = False
+        for field, actual in checks:
+            expected = engine.get(field)
+            if expected is None:
+                continue
+            compared = True
+            if actual is None or str(actual).casefold() != str(expected).casefold():
+                return False
+        return compared
+
     @staticmethod
     def _classified_item(source_price: int, listing: CarListing) -> ClassifiedListing:
         difference = listing.price - source_price
@@ -601,11 +685,10 @@ class SearchService:
         brand: str,
         model: str,
         year: int,
-        body_type: BodyType,
-        market_price: int,
+        body_type: BodyType | None,
     ) -> str | None:
         try:
-            entry = self.catalog.classify(brand, model, year, body_type, market_price)
+            entry = self.catalog.classify(brand, model, year, body_type)
         except Exception as exc:
             logger.warning("vehicle_classification error_type=%s", type(exc).__name__)
             return None

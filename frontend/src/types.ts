@@ -13,7 +13,7 @@ export type BodyType =
 export type BodyFilter = BodyType | "any";
 
 export type Transmission = "any" | "automatic" | "manual" | "robot" | "cvt";
-export type SearchRegion = "any" | "moscow" | "moscow_oblast" | "moscow_and_oblast";
+export type SearchRegion = string;
 export type RangeMode = "exact" | "range";
 
 export interface SearchForm {
@@ -141,6 +141,12 @@ export interface SearchResult {
     elapsed_seconds: number;
     rejected: Record<string, number>;
     resolved_url: string | null;
+  }>>;
+  source_operations: Record<string, Record<"target" | "competitors", {
+    state: string;
+    count: number;
+    detail: string;
+    elapsed_seconds: number;
   }>>;
   pipeline_diagnostics: Record<string, number>;
   direct: CategoryResult;

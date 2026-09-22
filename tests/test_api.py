@@ -33,7 +33,7 @@ def test_search_api_uses_typed_end_to_end_schema_without_fake_listings() -> None
     assert payload["source_vehicle"]["brand"] == "BMW"
     assert payload["source_vehicle"]["model"] == "5-Series"
     assert payload["source_vehicle"]["modification"] == "520i"
-    assert payload["source_vehicle"]["segment"] == "passenger_premium"
+    assert payload["source_vehicle"]["segment"] == "passenger"
     assert payload["source_status"] == {}
     assert payload["source_listings"] == {"listings": [], "model_groups": []}
     assert payload["source_model_group"] is None

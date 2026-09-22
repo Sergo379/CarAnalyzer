@@ -1,15 +1,15 @@
-from contextlib import suppress
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.models.car import SearchRequest
-from backend.models.catalog import VehicleModification
 from backend.services.marketplace_catalog import CatalogCache, CatalogEnrichmentService
 from backend.services.reference_data import regions_catalog, vehicle_catalog
 from backend.services.search_service import InvalidSearchSelection, SearchResult, SearchService
 
 router = APIRouter(prefix="/api", tags=["search"])
+logger = logging.getLogger(__name__)
 
 
 def get_search_service() -> SearchService:
@@ -51,10 +51,17 @@ def _year_window(year: int | None, year_from: int | None, year_to: int | None) -
 
 
 async def _enrich_window(cache: CatalogCache, brand: str, model: str, start: int, end: int) -> None:
-    years = range(start, end + 1) if end - start <= 20 else {start, round((start + end) / 2), end}
-    for selected_year in years:
-        with suppress(Exception):
-            await CatalogEnrichmentService(cache).ensure(brand, model, selected_year)
+    try:
+        state = await CatalogEnrichmentService(cache).ensure_window(brand, model, start, end)
+        if state not in {"fresh", "cached"}:
+            logger.warning("catalog enrichment state=%s brand=%s model=%s", state, brand, model)
+    except Exception as exc:
+        logger.warning(
+            "catalog enrichment state=source_unavailable brand=%s model=%s error_type=%s",
+            brand,
+            model,
+            type(exc).__name__,
+        )
 
 
 @router.get("/catalog/generations")
@@ -92,19 +99,13 @@ async def catalog_engines(
     cache = CatalogCache()
     start, end = _year_window(year, year_from, year_to)
     await _enrich_window(cache, brand, model, start, end)
-    return [
-        {
-            **item,
-            "label": VehicleModification.model_validate(item).label,
-        }
-        for item in cache.modifications(
-            brand,
-            model,
-            generation_id=generation_id,
-            year_from=start,
-            year_to=end,
-        )
-    ]
+    return cache.engine_options(
+        brand,
+        model,
+        generation_id=generation_id,
+        year_from=start,
+        year_to=end,
+    )
 
 
 @router.get("/catalog/status")

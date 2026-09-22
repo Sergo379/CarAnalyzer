@@ -40,7 +40,14 @@ def test_body_compatibility_is_configured() -> None:
 
 
 def test_classification_computes_difference() -> None:
-    source = Car(brand="BMW", model="520i", year=2022, body_type="sedan", price=4_100_000)
+    source = Car(
+        brand="BMW",
+        model="520i",
+        year=2022,
+        body_type="sedan",
+        price=4_100_000,
+        segment="passenger",
+    )
     listing = CarListing(
         source="auto.ru",
         external_id="1",
@@ -49,6 +56,7 @@ def test_classification_computes_difference() -> None:
         year=2022,
         body_type="sedan",
         price=3_900_000,
+        segment="passenger",
         url="https://auto.ru/cars/used/sale/1/",
         checked_at=datetime.now(UTC),
     )

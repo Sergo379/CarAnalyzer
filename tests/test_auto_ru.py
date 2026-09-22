@@ -118,7 +118,9 @@ def test_search_uses_structured_data_without_css_selectors() -> None:
         return httpx.Response(200, content=content, request=request)
 
     scraper = AutoRuScraper(
-        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
     )
     listings = asyncio.run(scraper.search(QUERY))
     assert len(listings) == 1
@@ -134,7 +136,9 @@ def test_search_card_avoids_detail_request_when_required_fields_are_present() ->
         return httpx.Response(200, content=search_card_html(), request=request)
 
     scraper = AutoRuScraper(
-        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
     )
     listings = asyncio.run(scraper.search(QUERY))
     assert [item.external_id for item in listings] == ["1134567890"]
@@ -153,7 +157,9 @@ def test_filtered_search_card_does_not_trigger_detail_request() -> None:
         return httpx.Response(200, content=content, request=request)
 
     scraper = AutoRuScraper(
-        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
     )
     assert asyncio.run(scraper.search(QUERY)) == []
     assert calls == [scraper.build_search_url(QUERY)]
@@ -171,7 +177,9 @@ def test_captcha_is_reported_explicitly() -> None:
         )
 
     scraper = AutoRuScraper(
-        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
     )
     try:
         asyncio.run(scraper.search(QUERY))
@@ -202,7 +210,9 @@ def test_discovery_deduplicates_compatible_body_urls() -> None:
         return httpx.Response(200, content=search_card_html(), request=request)
 
     scraper = AutoRuScraper(
-        settings=Settings(_env_file=None), transport=httpx.MockTransport(handler)
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
     )
     discovery = MarketDiscoveryRequest(
         source_vehicle=QUERY,

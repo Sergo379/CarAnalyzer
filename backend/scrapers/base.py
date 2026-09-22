@@ -77,6 +77,9 @@ class BaseScraper(ABC):
             elapsed_seconds=max((item.elapsed_seconds for item in values), default=0),
             rejected=rejected,
             resolved_url=next((item.resolved_url for item in values if item.resolved_url), None),
+            resolved_urls=[url for item in values for url in item.resolved_urls],
+            degraded=any(item.degraded for item in values),
+            notes=[note for item in values for note in item.notes],
         )
 
     @abstractmethod

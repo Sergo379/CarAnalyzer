@@ -80,3 +80,6 @@ class SourceDiagnostics(BaseModel):
     elapsed_seconds: float = Field(default=0, ge=0)
     rejected: dict[str, int] = Field(default_factory=dict)
     resolved_url: str | None = None
+    resolved_urls: list[str] = Field(default_factory=list)
+    degraded: bool = False
+    notes: list[str] = Field(default_factory=list)

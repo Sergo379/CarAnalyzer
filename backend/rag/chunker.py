@@ -29,6 +29,7 @@ class TextChunker:
                     source_title=document.source_title,
                     index=index,
                     content=content,
+                    metadata={"source_type": document.source_type},
                 )
             )
             if start + self.chunk_words >= len(words):

@@ -61,7 +61,7 @@ class Car(BaseModel):
     year: int = Field(ge=1900)
     body_type: BodyType
     transmission: Transmission = Transmission.ANY
-    region: SearchRegion = SearchRegion.ANY
+    region: str = SearchRegion.ANY.value
     price: int = Field(gt=0)
     segment: str | None = Field(default=None, max_length=80)
 
@@ -91,7 +91,7 @@ class SearchRequest(BaseModel):
     year_to: int | None = Field(default=None, ge=1900)
     body_type: BodyFilter = BodyFilter.ANY
     transmission: Transmission = Transmission.ANY
-    region: SearchRegion = SearchRegion.ANY
+    region: str = SearchRegion.ANY.value
     price_mode: RangeMode = RangeMode.EXACT
     price: int | None = Field(default=None, gt=0)
     price_from: int | None = Field(default=None, gt=0)

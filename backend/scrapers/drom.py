@@ -63,7 +63,10 @@ class DromScraper(BaseScraper):
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
         target_queries = self._target_body_queries(query)
-        diagnostic = self.reset_diagnostics("target", self.build_search_url(target_queries[0]))
+        target_by_url = {self.build_search_url(item): item for item in target_queries}
+        first_url = next(iter(target_by_url))
+        diagnostic = self.reset_diagnostics("target", first_url)
+        diagnostic.resolved_urls = list(target_by_url)
         listings: list[CarListing] = []
         seen: set[str] = set()
         async with httpx.AsyncClient(
@@ -72,8 +75,8 @@ class DromScraper(BaseScraper):
             timeout=self.settings.scraper_timeout_seconds,
             transport=self.transport,
         ) as client:
-            for target_query in target_queries:
-                url: str | None = self.build_search_url(target_query)
+            for initial_url, target_query in target_by_url.items():
+                url: str | None = initial_url
                 for _ in range(self.settings.scraper_max_pages):
                     if url is None:
                         break
@@ -138,9 +141,16 @@ class DromScraper(BaseScraper):
             timeout=self.settings.scraper_timeout_seconds,
             transport=self.transport,
         ) as client:
+            routes: dict[str, BodyType] = {}
             for body_type in sorted(query.body_types, key=str):
                 initial_url = self.build_discovery_url(query, body_type)
-                diagnostic.resolved_url = diagnostic.resolved_url or initial_url
+                routes.setdefault(initial_url, self._route_body_type(body_type))
+            diagnostic.resolved_urls = list(routes)
+            diagnostic.resolved_url = next(iter(routes), None)
+
+            async def collect_route(initial_url: str, route_body: BodyType) -> list[CarListing]:
+                route_listings: list[CarListing] = []
+                route_seen: set[str] = set()
                 url: str | None = initial_url
                 for _ in range(self.settings.scraper_max_pages):
                     if url is None:
@@ -152,29 +162,48 @@ class DromScraper(BaseScraper):
                     content = await self._content_with_fallback(response, url, diagnostic)
                     diagnostic.pages_scanned += 1
                     diagnostic.raw_count += self._card_count(content)
-                    parsed = self.parse_discovery(content, body_type)
+                    parsed = self.parse_discovery(content, route_body, diagnostic)
                     diagnostic.parsed_count += len(parsed)
                     new_count = 0
                     for listing in parsed:
-                        if listing.external_id in seen:
-                            diagnostic.rejected["duplicate"] = (
-                                diagnostic.rejected.get("duplicate", 0) + 1
-                            )
+                        if listing.external_id in route_seen:
                             continue
                         if query.price_from <= listing.price <= query.price_to:
-                            seen.add(listing.external_id)
-                            listings.append(listing)
+                            route_seen.add(listing.external_id)
+                            route_listings.append(listing)
                             new_count += 1
-                            if len(listings) >= self.settings.scraper_max_listings:
-                                diagnostic.accepted_count = len(listings)
-                                return listings
+                            if len(route_listings) >= self.settings.scraper_max_listings:
+                                return route_listings
                         else:
                             diagnostic.rejected["price"] = diagnostic.rejected.get("price", 0) + 1
                     if new_count == 0:
                         break
                     url = self._next_page_url(content, str(response.url))
+                return route_listings
+
+            batches = await asyncio.gather(
+                *(collect_route(url, body) for url, body in routes.items())
+            )
+            for batch in batches:
+                for listing in batch:
+                    if listing.external_id in seen:
+                        diagnostic.rejected["duplicate"] = (
+                            diagnostic.rejected.get("duplicate", 0) + 1
+                        )
+                        continue
+                    seen.add(listing.external_id)
+                    listings.append(listing)
+                    if len(listings) >= self.settings.scraper_max_listings:
+                        diagnostic.accepted_count = len(listings)
+                        return listings
         diagnostic.accepted_count = len(listings)
         return listings
+
+    @staticmethod
+    def _route_body_type(body_type: BodyType) -> BodyType:
+        # Drom's /suv/ route combines crossovers and SUVs. Preserve the broad
+        # source category instead of labelling every card as the requested subtype.
+        return BodyType.SUV if _DROM_BODY_PATHS[body_type] == "suv" else body_type
 
     @staticmethod
     def build_discovery_url(query: MarketDiscoveryRequest, body_type: BodyType) -> str:
@@ -204,7 +233,11 @@ class DromScraper(BaseScraper):
         path = "/".join(parts[-2:])
         region = drom_region_prefix(query.region)
         region_query = drom_region_query(query.region)
-        body_path = "" if query.body_type == BodyFilter.ANY else f"{query.body_type.value}/"
+        body_path = (
+            ""
+            if query.body_type == BodyFilter.ANY
+            else f"{_DROM_BODY_PATHS[BodyType(query.body_type.value)]}/"
+        )
         year_path = (
             f"year-{query.effective_year_from}"
             if query.effective_year_from == query.effective_year_to
@@ -318,7 +351,9 @@ class DromScraper(BaseScraper):
         return next(iter(bodies)) if len(bodies) == 1 else None
 
     @classmethod
-    def parse_discovery(cls, content: bytes, body_type: BodyType) -> list[CarListing]:
+    def parse_discovery(
+        cls, content: bytes, body_type: BodyType, diagnostic=None
+    ) -> list[CarListing]:
         soup = BeautifulSoup(content, "lxml")
         listings: list[CarListing] = []
         seen: set[str] = set()
@@ -327,63 +362,63 @@ class DromScraper(BaseScraper):
                 continue
             if card.find_parent(attrs={"data-ftid": "bulletin-list_archive"}) is not None:
                 continue
-            link = card.find("a", attrs={"data-ftid": "bull_title"}, href=True)
-            if not isinstance(link, Tag):
-                continue
-            url = str(link.get("href"))
-            external_id = cls._external_id(url)
-            if external_id in seen:
-                continue
-            title = cls._text(card, "bull_title")
-            year_match = _YEAR.search(title)
-            if not year_match:
-                continue
-            name = re.split(r",\s*(?:19|20)\d{2}\b", title, maxsplit=1)[0].strip()
-            brand, model = cls._split_name(name)
-            subtitle = cls._text(card, "bull_subtitle")
-            technical = cls._technical_metadata(subtitle)
-            identity = Normalizer.marketplace_identity(
-                brand, name, cls._model_slug(url), subtitle or None
-            )
             try:
+                link = card.find("a", attrs={"data-ftid": "bull_title"}, href=True)
+                if not isinstance(link, Tag):
+                    raise ValueError("missing title link")
+                url = str(link.get("href"))
+                external_id = cls._external_id(url)
+                if external_id in seen:
+                    continue
+                title = cls._text(card, "bull_title")
+                year_match = _YEAR.search(title)
+                if not year_match:
+                    raise ValueError("missing year")
+                parts = [part for part in urlparse(url).path.split("/") if part]
+                if len(parts) < 3:
+                    raise ValueError("missing source identity path")
+                brand_slug, model_slug = parts[-3], parts[-2]
+                brand = brand_slug.replace("_", " ").replace("-", " ")
+                name = re.split(r",\s*(?:19|20)\d{2}\b", title, maxsplit=1)[0].strip()
+                subtitle = cls._text(card, "bull_subtitle")
+                technical = cls._technical_metadata(subtitle)
+                identity = Normalizer.marketplace_identity(
+                    brand, name, model_slug, subtitle or None
+                )
+                parsed_body = Normalizer.body_type_from_text(f"{title} {subtitle}") or body_type
                 listing = CarListing(
                     source=cls.source,
                     external_id=external_id,
                     brand=identity.brand,
-                    model=identity.family_model or model,
+                    model=identity.family_model,
                     modification=identity.modification,
                     fuel_type=technical["fuel_type"],
                     engine_displacement=technical["engine_displacement"],
                     power_hp=technical["power_hp"],
                     drivetrain=technical["drivetrain"],
                     year=int(year_match.group()),
-                    body_type=body_type,
+                    body_type=parsed_body,
                     transmission=Normalizer.transmission_from_text(subtitle),
                     price=Normalizer.price(cls._text(card, "bull_price")),
                     url=url,
                     location=cls._text(card, "bull_location") or None,
                     city=cls._text(card, "bull_location") or None,
                     checked_at=datetime.now(UTC),
-                    raw_metadata={"title": title, "subtitle": subtitle},
+                    raw_metadata={
+                        "title": title,
+                        "subtitle": subtitle,
+                        "source_brand_slug": brand_slug,
+                        "source_model_slug": model_slug,
+                        "body_source": "card" if parsed_body != body_type else "route",
+                    },
                 )
-            except (ValidationError, ValueError) as exc:
-                raise ScraperParseError(f"Invalid Drom listing: {url}") from exc
+            except (ScraperParseError, ValidationError, ValueError):
+                if diagnostic is not None:
+                    diagnostic.rejected["parse"] = diagnostic.rejected.get("parse", 0) + 1
+                continue
             seen.add(external_id)
             listings.append(listing)
         return listings
-
-    @staticmethod
-    def _split_name(name: str) -> tuple[str, str]:
-        words = name.split()
-        if len(words) < 2:
-            raise ScraperParseError(f"Drom title has no make/model: {name}")
-        if len(words) >= 3 and " ".join(words[:2]).casefold() in {
-            "land rover",
-            "alfa romeo",
-            "great wall",
-        }:
-            return " ".join(words[:2]), " ".join(words[2:])
-        return words[0], " ".join(words[1:])
 
     @staticmethod
     def _model_slug(url: str) -> str | None:

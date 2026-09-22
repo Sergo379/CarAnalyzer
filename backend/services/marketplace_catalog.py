@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
+import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,12 +30,14 @@ from backend.models.catalog import (
 from backend.services.normalizer import Normalizer
 from backend.services.reference_data import DATA_ROOT
 
-CATALOG_PATH = DATA_ROOT / "vehicle_catalog.json"
+CATALOG_SEED_PATH = DATA_ROOT / "vehicle_catalog_seed.json"
+CATALOG_RUNTIME_PATH = DATA_ROOT.parent.parent / "data" / "vehicle_catalog_runtime.json"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
 DETAIL_TTL = timedelta(days=90)
+_CATALOG_WRITE_LOCK = asyncio.Lock()
 
 
 @dataclass(slots=True)
@@ -203,6 +209,56 @@ def _model_key(value: str) -> str:
     return f"{match.group(1)}series" if match else key
 
 
+_CYRILLIC_TO_LATIN = str.maketrans(
+    {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "x",
+        "ц": "c",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+)
+
+
+def _identity_keys(value: str) -> frozenset[str]:
+    """Exact language/script-normalized keys; never prefix/substring guesses."""
+
+    folded = value.casefold().replace("серии", "series").replace("серия", "series")
+    compact = _key(folded)
+    # Russian loan spelling "рей" and English "ray" are phonetic equivalents.
+    phonetic = folded.replace("ей", "ай").translate(_CYRILLIC_TO_LATIN)
+    transliterated = re.sub(r"[^0-9a-z]+", "", phonetic)
+    return frozenset(key for key in (compact, transliterated) if key)
+
+
 def _source_ref(source: str, url: str) -> SourceReference:
     parsed = urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -216,15 +272,35 @@ def _source_ref(source: str, url: str) -> SourceReference:
 
 @dataclass(slots=True)
 class CatalogCache:
-    path: Path = CATALOG_PATH
+    # `path` remains the first argument for isolated tests. Production reads an
+    # immutable tracked seed and writes enrichment only to the ignored runtime cache.
+    path: Path | None = None
+    seed_path: Path = CATALOG_SEED_PATH
+    runtime_path: Path = CATALOG_RUNTIME_PATH
     _payload: dict[str, object] | None = field(default=None, init=False)
     _mtime_ns: int | None = field(default=None, init=False)
+    _loaded_path: Path | None = field(default=None, init=False)
+
+    def read_path(self) -> Path:
+        if self.path is not None:
+            return self.path
+        return self.runtime_path if self.runtime_path.exists() else self.seed_path
+
+    def write_path(self) -> Path:
+        return self.path if self.path is not None else self.runtime_path
 
     def load(self) -> dict[str, object]:
-        mtime_ns = self.path.stat().st_mtime_ns
-        if self._payload is None or self._mtime_ns != mtime_ns:
-            self._payload = json.loads(self.path.read_text(encoding="utf-8"))
+        active_path = self.read_path()
+        if not active_path.exists():
+            self._payload = {"version": 3, "sources": {}, "brands": []}
+            self._mtime_ns = None
+            self._loaded_path = active_path
+            return self._payload
+        mtime_ns = active_path.stat().st_mtime_ns
+        if self._payload is None or self._mtime_ns != mtime_ns or self._loaded_path != active_path:
+            self._payload = json.loads(active_path.read_text(encoding="utf-8"))
             self._mtime_ns = mtime_ns
+            self._loaded_path = active_path
         return self._payload
 
     def brands(self) -> list[str]:
@@ -237,13 +313,60 @@ class CatalogCache:
     def models(self, brand: str) -> list[str]:
         return [str(model["name"]) for model in self.model_entries(brand)]
 
+    def brand_entry(self, brand: str) -> dict[str, object] | None:
+        return self._brand_entry(brand)
+
     def model_entry(self, brand: str, model: str) -> dict[str, object] | None:
-        needle = _model_key(model)
-        for entry in self.model_entries(brand):
-            aliases = entry.get("aliases", [])
-            keys = {_model_key(str(entry["name"])), *(_model_key(str(x)) for x in aliases)}
-            if needle in keys:
-                return entry
+        entries = self.model_entries(brand)
+        needle_keys = _identity_keys(model)
+        canonical_id_matches = [entry for entry in entries if str(entry.get("id")) == model]
+        if len(canonical_id_matches) == 1:
+            return canonical_id_matches[0]
+
+        # Stable source slugs/paths take priority over display strings.
+        source_matches = []
+        for entry in entries:
+            source_keys = {
+                key
+                for ref in entry.get("source_refs", [])
+                for key in _identity_keys(str(ref.get("slug", "")))
+            }
+            if needle_keys & source_keys:
+                source_matches.append(entry)
+        if len(source_matches) == 1:
+            return source_matches[0]
+        if len(source_matches) > 1:
+            return None
+
+        name_matches = []
+        for entry in entries:
+            values = [str(entry["name"]), *(str(value) for value in entry.get("aliases", []))]
+            keys = {key for value in values for key in _identity_keys(value)}
+            if needle_keys & keys:
+                name_matches.append(entry)
+        if len(name_matches) == 1:
+            return name_matches[0]
+        if len(name_matches) > 1:
+            return None
+
+        # A numeric trim (for example 520i) may identify an ordinal series only
+        # when the catalog has exactly one exact ordinal-family entry. This is
+        # deliberately not prefix matching: derived families remain distinct.
+        compact = _model_key(model)
+        numeric = re.fullmatch(r"([1-9])\d{2}[a-z]*", compact)
+        if numeric:
+            ordinal_keys = {f"{numeric.group(1)}series", f"{numeric.group(1)}er"}
+            family_matches = []
+            for entry in entries:
+                values = [
+                    str(entry["name"]),
+                    *(str(value) for value in entry.get("aliases", [])),
+                    *(str(ref.get("slug", "")) for ref in entry.get("source_refs", [])),
+                ]
+                if ordinal_keys & {key for value in values for key in _identity_keys(value)}:
+                    family_matches.append(entry)
+            if len(family_matches) == 1:
+                return family_matches[0]
         return None
 
     def resolve_identity(self, brand: str, model: str) -> CanonicalVehicleIdentity:
@@ -259,34 +382,8 @@ class CatalogCache:
                 provisional=True,
             )
 
-        entries = list(brand_entry.get("models", []))
         needle = _model_key(model)
         match = self.model_entry(str(brand_entry["name"]), model)
-        if match is None:
-            candidates: list[tuple[int, dict[str, object]]] = []
-            for entry in entries:
-                names = [str(entry["name"]), *(str(x) for x in entry.get("aliases", []))]
-                for value in names:
-                    key = _model_key(value)
-                    if key and (key in needle or needle in key):
-                        candidates.append((len(key), entry))
-                for raw_ref in entry.get("source_refs", []):
-                    ref_key = _model_key(str(raw_ref.get("slug", "")))
-                    if ref_key and (ref_key in needle or needle in ref_key):
-                        candidates.append((len(ref_key), entry))
-            # A three-digit trim such as 520i -> 5 Series is a catalog-derived
-            # fallback, not a make-specific rule.
-            numeric = re.match(r"([1-9])\d{2}[a-z]*$", needle)
-            if numeric:
-                ordinal = numeric.group(1)
-                for entry in entries:
-                    key = _model_key(str(entry["name"]))
-                    if key.startswith(ordinal) and any(
-                        marker in key for marker in ("series", "серии", "serie", "er")
-                    ):
-                        candidates.append((10_000 - len(key), entry))
-            if candidates:
-                match = max(candidates, key=lambda item: item[0])[1]
 
         if match is None:
             provisional_model = needle or "unknown"
@@ -357,6 +454,87 @@ class CatalogCache:
                     result.append(modification)
         return result
 
+    @staticmethod
+    def engine_key(modification: dict[str, object]) -> str:
+        engine = modification.get("engine") or {}
+        normalized = "|".join(
+            str(engine.get(field) or "").strip().casefold()
+            for field in ("fuel_type", "displacement_l", "power_hp", "engine_code")
+        )
+        return f"engine:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
+
+    def engine_options(
+        self,
+        brand: str,
+        model: str,
+        year: int | None = None,
+        generation_id: str | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[dict[str, object]]:
+        grouped: dict[str, dict[str, object]] = {}
+        for modification in self.modifications(
+            brand, model, year, generation_id, year_from, year_to
+        ):
+            key = self.engine_key(modification)
+            option = grouped.setdefault(
+                key,
+                {
+                    "id": key,
+                    "engine": modification.get("engine") or {},
+                    "modification_ids": [],
+                    "source_refs": [],
+                },
+            )
+            option["modification_ids"].append(str(modification["id"]))
+            known_refs = {
+                (str(item.get("source")), str(item.get("path"))) for item in option["source_refs"]
+            }
+            option["source_refs"].extend(
+                ref
+                for ref in modification.get("source_refs", [])
+                if (str(ref.get("source")), str(ref.get("path"))) not in known_refs
+            )
+        for option in grouped.values():
+            engine = EngineSpec.model_validate(option["engine"])
+            parts = []
+            if engine.displacement_l is not None:
+                parts.append(f"{engine.displacement_l:g} л")
+            if engine.fuel_type:
+                parts.append(engine.fuel_type)
+            if engine.power_hp is not None:
+                parts.append(f"{engine.power_hp} л.с.")
+            if engine.engine_code:
+                parts.append(engine.engine_code)
+            option["label"] = " · ".join(parts) or "Двигатель не указан"
+        return sorted(grouped.values(), key=lambda item: str(item["label"]).casefold())
+
+    def engine_option(
+        self,
+        brand: str,
+        model: str,
+        engine_id: str | None,
+        generation_id: str | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> dict[str, object] | None:
+        if not engine_id:
+            return None
+        return next(
+            (
+                option
+                for option in self.engine_options(
+                    brand,
+                    model,
+                    generation_id=generation_id,
+                    year_from=year_from,
+                    year_to=year_to,
+                )
+                if option["id"] == engine_id or engine_id in option["modification_ids"]
+            ),
+            None,
+        )
+
     def generation(
         self, brand: str, model: str, generation_id: str | None
     ) -> dict[str, object] | None:
@@ -401,14 +579,30 @@ class CatalogCache:
         }
 
     def save(self, payload: dict[str, object]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        temporary.replace(self.path)
+        target = self.write_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(payload, temporary, ensure_ascii=False, indent=2)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, target)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
         self._payload = payload
-        self._mtime_ns = self.path.stat().st_mtime_ns
+        self._mtime_ns = target.stat().st_mtime_ns
+        self._loaded_path = target
 
     def save_model_details(
         self, brand: str, model: str, generations: list[VehicleGeneration]
@@ -424,12 +618,52 @@ class CatalogCache:
         entry["details_updated_at"] = datetime.now(UTC).isoformat()
         self.save(payload)
 
+    async def merge_source_mapping(
+        self,
+        source: str,
+        brand: str,
+        model: str,
+        brand_ref: SourceReference,
+        model_ref: SourceReference,
+    ) -> None:
+        async with _CATALOG_WRITE_LOCK:
+            self._payload = None
+            payload = self.load()
+            brand_entry = self._brand_entry(brand)
+            model_entry = self.model_entry(brand, model)
+            if brand_entry is None or model_entry is None:
+                return
+
+            def add_ref(entry: dict[str, object], ref: SourceReference) -> None:
+                refs = list(entry.get("source_refs", []))
+                serialized = ref.model_dump(mode="json")
+                refs = [
+                    value
+                    for value in refs
+                    if not (
+                        value.get("source") == source and value.get("path") == serialized["path"]
+                    )
+                ]
+                refs.append(serialized)
+                entry["source_refs"] = refs
+
+            add_ref(brand_entry, brand_ref)
+            add_ref(model_entry, model_ref)
+            self.save(payload)
+
     def details_are_fresh(self, brand: str, model: str, year: int) -> bool:
         entry = self.model_entry(brand, model)
         if not entry or not self.generations(brand, model, year):
             return False
         raw = entry.get("details_updated_at")
         return bool(raw and datetime.now(UTC) - datetime.fromisoformat(str(raw)) <= DETAIL_TTL)
+
+    def details_are_fresh_window(self, brand: str, model: str, start: int, end: int) -> bool:
+        entry = self.model_entry(brand, model)
+        raw = entry.get("details_updated_at") if entry else None
+        if not raw or datetime.now(UTC) - datetime.fromisoformat(str(raw)) > DETAIL_TTL:
+            return False
+        return bool(self.generations(brand, model, year_from=start, year_to=end))
 
     def _brand_entry(self, brand: str) -> dict[str, object] | None:
         needle = _key(_brand_name(brand))
@@ -495,14 +729,63 @@ class CatalogSyncService:
         for brand_key, brand in merged.items():
             brand.models = sorted(model_maps[brand_key].values(), key=lambda x: x.name.casefold())
         brands = sorted(merged.values(), key=lambda x: x.name.casefold())
-        payload: dict[str, object] = {
+        update: dict[str, object] = {
             "version": 3,
             "catalog_updated_at": datetime.now(UTC).isoformat(),
             "sources": source_status,
             "brands": [brand.model_dump(mode="json") for brand in brands],
         }
-        self.cache.save(payload)
+        async with _CATALOG_WRITE_LOCK:
+            payload = self._merge_payload(deepcopy(self.cache.load()), update)
+            self.cache.save(payload)
         return self.cache.status()
+
+    @staticmethod
+    def _merge_payload(existing: dict[str, object], update: dict[str, object]) -> dict[str, object]:
+        """Merge successful source observations without deleting cached enrichment."""
+
+        def merge_refs(current: list[dict], incoming: list[dict]) -> list[dict]:
+            merged = {(str(item.get("source")), str(item.get("path"))): item for item in current}
+            for item in incoming:
+                merged[(str(item.get("source")), str(item.get("path")))] = item
+            return list(merged.values())
+
+        brands = {str(item["id"]): item for item in existing.get("brands", [])}
+        for incoming_brand in update.get("brands", []):
+            brand_id = str(incoming_brand["id"])
+            brand = brands.setdefault(brand_id, incoming_brand)
+            if brand is incoming_brand:
+                continue
+            brand["aliases"] = sorted(
+                {*brand.get("aliases", []), *incoming_brand.get("aliases", [])},
+                key=str.casefold,
+            )
+            brand["source_refs"] = merge_refs(
+                brand.get("source_refs", []), incoming_brand.get("source_refs", [])
+            )
+            models = {str(item["id"]): item for item in brand.get("models", [])}
+            for incoming_model in incoming_brand.get("models", []):
+                model_id = str(incoming_model["id"])
+                model = models.setdefault(model_id, incoming_model)
+                if model is incoming_model:
+                    continue
+                model["aliases"] = sorted(
+                    {*model.get("aliases", []), *incoming_model.get("aliases", [])},
+                    key=str.casefold,
+                )
+                model["source_refs"] = merge_refs(
+                    model.get("source_refs", []), incoming_model.get("source_refs", [])
+                )
+            brand["models"] = sorted(models.values(), key=lambda item: str(item["name"]).casefold())
+        existing_sources = dict(existing.get("sources", {}))
+        existing_sources.update(update.get("sources", {}))
+        return {
+            **existing,
+            "version": max(int(existing.get("version", 0)), int(update.get("version", 0))),
+            "catalog_updated_at": update.get("catalog_updated_at"),
+            "sources": existing_sources,
+            "brands": sorted(brands.values(), key=lambda item: str(item["name"]).casefold()),
+        }
 
 
 class CatalogEnrichmentService:
@@ -510,20 +793,33 @@ class CatalogEnrichmentService:
         self.cache = cache or CatalogCache()
 
     async def ensure(self, brand: str, model: str, year: int) -> None:
-        if self.cache.details_are_fresh(brand, model, year):
-            return
-        ref = self.cache.source_model_ref("drom.ru", brand, model)
-        if ref is None:
-            return
-        url = ref.url.rstrip("/") + f"/{year}/"
-        async with httpx.AsyncClient(
-            headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=30
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        generations = self.parse_drom_year(response.content, brand, model, year, url)
-        if generations:
-            self.cache.save_model_details(brand, model, generations)
+        await self.ensure_window(brand, model, year, year)
+
+    async def ensure_window(self, brand: str, model: str, start: int, end: int) -> str:
+        if self.cache.details_are_fresh_window(brand, model, start, end):
+            return "cached"
+        async with _CATALOG_WRITE_LOCK:
+            # Recheck after waiting: another endpoint may already have enriched it.
+            self.cache._payload = None
+            if self.cache.details_are_fresh_window(brand, model, start, end):
+                return "cached"
+            ref = self.cache.source_model_ref("drom.ru", brand, model)
+            if ref is None:
+                return "source_unavailable"
+            url = ref.url.rstrip("/") + "/"
+            async with httpx.AsyncClient(
+                headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=30
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            generations = self.parse_drom_year(
+                response.content, brand, model, round((start + end) / 2), url
+            )
+            if generations:
+                self.cache._payload = None
+                self.cache.save_model_details(brand, model, generations)
+                return "fresh"
+            return "parse_error"
 
     @classmethod
     def parse_drom_year(

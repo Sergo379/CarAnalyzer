@@ -14,7 +14,9 @@ def _read_json(name: str) -> dict[str, Any]:
 
 @lru_cache
 def vehicle_catalog() -> dict[str, Any]:
-    payload = _read_json("vehicle_catalog.json")
+    from backend.services.marketplace_catalog import CatalogCache
+
+    payload = CatalogCache().load()
     # Preserve the legacy full-catalog endpoint while the primary API serves
     # brands and models independently. Version 2 stores model provenance.
     if payload.get("version") in {2, 3}:

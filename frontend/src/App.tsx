@@ -80,6 +80,7 @@ const statusLabels: Record<string, string> = {
   unsupported_query: "запрос не поддерживается",
   robots_restricted: "ограничен правилами площадки",
   blocked: "источник ограничил доступ",
+  timeout: "превышен лимит времени",
   error: "временно недоступен",
 };
 
@@ -365,7 +366,7 @@ export default function App() {
         <>
           <section className="summary">
             <div><p className="eyebrow">Исходный автомобиль</p><h2>{result.source_vehicle.brand} {result.source_vehicle.model}, {result.source_vehicle.year_mode === "exact" ? result.source_vehicle.year : `${result.source_vehicle.year_from}–${result.source_vehicle.year_to}`}</h2><p>{bodyLabels[result.source_vehicle.body_type]} · {transmissionLabels[result.source_vehicle.transmission]} · {regions.find((region) => region.value === result.source_vehicle.region)?.label ?? result.source_vehicle.region} · {result.source_vehicle.price_mode === "exact" ? rubles.format(result.source_vehicle.price ?? 0) : `${rubles.format(result.source_vehicle.price_from ?? 0)} — ${rubles.format(result.source_vehicle.price_to ?? 0)}`}</p></div>
-            <div className="statuses">{Object.entries(result.source_status).map(([source, status]) => <span title={result.source_details[source]} className={`status ${status}`} key={source}>{sourceLabels[source] ?? source} — {statusLabels[status] ?? status} · {result.source_distribution[source] ?? 0}</span>)}</div>
+            <div className="statuses">{Object.entries(result.source_operations).map(([source, operations]) => <span title={`${operations.target.detail}; ${operations.competitors.detail}`} className={`status ${result.source_status[source]}`} key={source}><strong>{sourceLabels[source] ?? source}</strong><br />рынок — {statusLabels[operations.target.state] ?? operations.target.state} · {operations.target.count}<br />конкуренты — {statusLabels[operations.competitors.state] ?? operations.competitors.state} · {operations.competitors.count}</span>)}</div>
           </section>
           {result.warnings.length > 0 && <div className="alert warning"><strong>Часть источников недоступна</strong>{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
           <Category title="Рынок исходной модели" subtitle="Объявления исходной модели" data={result.source_listings} />

@@ -26,13 +26,10 @@ class CarKnowledgeService:
     ) -> CarKnowledgeResult:
         profile = self.repository.get_profile(brand, model, year, generation)
         if profile is None:
-            profile = self.repository.upsert_profile(
-                brand=brand,
-                model=model,
-                year=year,
-                segment=segment,
-                body_types=[body_type] if body_type else [],
-                generation=generation,
+            return CarKnowledgeResult(
+                status=KnowledgeState.UNKNOWN_VEHICLE,
+                profile=None,
+                problems=None,
             )
         problems = self.repository.get_problem_profile(profile.id)
         if problems is not None and self._fresh(problems.updated_at):

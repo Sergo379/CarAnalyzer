@@ -205,7 +205,7 @@ def test_unknown_ford_uses_broad_price_body_discovery_and_price_700000() -> None
     assert scraper.request.price_to == 840_000
     assert scraper.request.body_types == frozenset({"hatchback", "liftback"})
     assert result.source_vehicle.model == "Fiesta"
-    assert result.source_vehicle.segment == "passenger_value"
+    assert result.source_vehicle.segment == "passenger"
     assert result.direct.listings[0].listing.model == "Yaris"
     assert "ford:fiesta" in result.car_knowledge
     assert "toyota:yaris" in result.car_knowledge

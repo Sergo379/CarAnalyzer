@@ -61,8 +61,11 @@ CREATE TABLE IF NOT EXISTS rag_documents (
  car_profile_id INTEGER NOT NULL REFERENCES car_profiles(id) ON DELETE RESTRICT,
  source_url TEXT NOT NULL,
  source_title TEXT NOT NULL,
+ source_type TEXT NOT NULL DEFAULT 'web',
  fetched_at TEXT NOT NULL,
+ content_hash TEXT NOT NULL DEFAULT '',
  content TEXT NOT NULL,
+ metadata TEXT NOT NULL DEFAULT '{}',
  UNIQUE (car_profile_id, source_url)
 );
 CREATE TABLE IF NOT EXISTS rag_chunks (
@@ -85,6 +88,18 @@ ON rag_chunks(document_id);
 def initialize_connection(connection: sqlite3.Connection) -> None:
     """Apply the non-destructive schema to an open SQLite connection."""
     connection.executescript(SCHEMA)
+    migrations = {
+        "rag_documents": {
+            "source_type": "TEXT NOT NULL DEFAULT 'web'",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+        },
+        "rag_chunks": {"metadata": "TEXT NOT NULL DEFAULT '{}'"},
+    }
+    for table, columns in migrations.items():
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
     connection.commit()
 
 

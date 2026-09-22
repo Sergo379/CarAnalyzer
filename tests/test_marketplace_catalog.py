@@ -167,3 +167,98 @@ def test_sync_does_not_merge_one_edit_model_names_without_explicit_alias() -> No
     entries = CatalogCache(cache_path).model_entries("Example")
     assert [entry["name"] for entry in entries] == ["Roadstar", "Roadster"]
     cache_path.unlink()
+
+
+def test_runtime_cache_starts_from_seed_and_never_writes_seed() -> None:
+    seed_path = _cache_path("seed.json")
+    runtime_path = _cache_path("runtime.json")
+    seed_payload = {"version": 3, "sources": {}, "brands": []}
+    seed_path.write_text(json.dumps(seed_payload), encoding="utf-8")
+    cache = CatalogCache(seed_path=seed_path, runtime_path=runtime_path)
+
+    assert cache.load() == seed_payload
+    cache.save({**seed_payload, "catalog_updated_at": "runtime"})
+
+    assert json.loads(seed_path.read_text(encoding="utf-8")) == seed_payload
+    assert json.loads(runtime_path.read_text(encoding="utf-8"))["catalog_updated_at"] == "runtime"
+    seed_path.unlink()
+    runtime_path.unlink()
+
+
+def test_sync_preserves_unavailable_source_refs_and_enrichment() -> None:
+    cache_path = _cache_path("non-destructive-merge.json")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "sources": {"offline.test": {"status": "ok"}},
+                "brands": [
+                    {
+                        "id": "example",
+                        "name": "Example",
+                        "aliases": [],
+                        "source_refs": [],
+                        "models": [
+                            {
+                                "id": "example:one",
+                                "name": "One",
+                                "aliases": [],
+                                "source_refs": [
+                                    {
+                                        "source": "offline.test",
+                                        "url": "https://offline.test/one/",
+                                        "path": "/one/",
+                                        "slug": "one",
+                                    }
+                                ],
+                                "generations": [{"id": "known", "name": "Known"}],
+                                "details_updated_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    asyncio.run(
+        CatalogSyncService(
+            [FakeSource("online.test", {"Example": ["One", "Two"]})],
+            CatalogCache(cache_path),
+        ).sync()
+    )
+    cache = CatalogCache(cache_path)
+    one = cache.model_entry("Example", "One")
+    assert one is not None
+    assert {ref["source"] for ref in one["source_refs"]} == {
+        "offline.test",
+        "online.test",
+    }
+    assert one["generations"] == [{"id": "known", "name": "Known"}]
+    assert cache.model_entry("Example", "Two") is not None
+    cache_path.unlink()
+
+
+def test_identity_resolution_is_exact_and_collision_safe() -> None:
+    cache = CatalogCache()
+    assert cache.resolve_identity("Audi", "A5").canonical_model_id == "audi:a5"
+    assert cache.resolve_identity("Audi", "A5L").canonical_model_id == "audi:a5l"
+    assert cache.resolve_identity("BMW", "X5").canonical_model_id == "bmw:x5"
+    assert cache.resolve_identity("BMW", "iX5").canonical_model_id == "bmw:ix5"
+
+
+def test_xray_script_variants_resolve_without_collapsing_cross() -> None:
+    cache = CatalogCache()
+    expected = cache.resolve_identity("Lada", "Х-рей").canonical_model_id
+    assert expected == "lada:хрей"
+    for value in ("X-ray", "XRAY", "xray", "X-рей"):
+        assert cache.resolve_identity("Lada", value).canonical_model_id == expected
+    assert cache.resolve_identity("Lada", "XRAY Cross").canonical_model_id == "lada:хрейкросс"
+
+
+def test_engine_options_deduplicate_trims_by_engine_spec() -> None:
+    cache = CatalogCache()
+    options = cache.engine_options("Audi", "A5", year=2020)
+    assert options
+    assert len(options) < len(cache.modifications("Audi", "A5", year=2020))
+    assert all(str(option["id"]).startswith("engine:") for option in options)

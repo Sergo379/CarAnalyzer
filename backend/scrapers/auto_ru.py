@@ -12,16 +12,20 @@ from pydantic import ValidationError
 
 from backend.config import Settings, get_settings
 from backend.models.car import BodyType, MarketDiscoveryRequest, SearchRequest, Transmission
+from backend.models.catalog import SourceReference
 from backend.models.listing import CarListing
 from backend.scrapers.base import (
     AuthenticationRequiredError,
     BaseScraper,
     CaptchaRequiredError,
+    Http403Error,
+    Http429Error,
+    ScraperError,
     ScraperParseError,
 )
 from backend.services.marketplace_catalog import CatalogCache
 from backend.services.normalizer import Normalizer
-from backend.services.regions import auto_ru_region_prefix
+from backend.services.regions import auto_ru_region_prefix, region_value
 
 _EXTERNAL_ID = re.compile(r"/cars/(?:used|new)/sale/[^/]+/[^/]+/(\d+)-[a-zA-Z0-9]+/?")
 _LOCATION = re.compile(
@@ -89,8 +93,6 @@ class AutoRuScraper(BaseScraper):
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
         started = time.perf_counter()
-        search_url = self.build_search_url(query)
-        diagnostic = self.reset_diagnostics("target", search_url)
         limits = httpx.Limits(
             max_connections=self.settings.scraper_detail_concurrency,
             max_keepalive_connections=self.settings.scraper_detail_concurrency,
@@ -109,6 +111,20 @@ class AutoRuScraper(BaseScraper):
             limits=limits,
             transport=self.transport,
         ) as client:
+            search_url, model_specific = await self._resolve_search_url(client, query)
+            diagnostic = self.reset_diagnostics("target", search_url)
+            diagnostic.resolved_urls.append(search_url)
+            if not model_specific:
+                diagnostic.degraded = True
+                diagnostic.notes.append("model-specific Auto.ru mapping unavailable")
+            if query.generation_id:
+                generation = self.catalog.generation(query.brand, query.model, query.generation_id)
+                refs = generation.get("source_refs", []) if generation else []
+                if not any(ref.get("source") == self.source for ref in refs):
+                    diagnostic.degraded = True
+                    diagnostic.notes.append(
+                        "generation enforced locally; native Auto.ru generation mapping unavailable"
+                    )
             offers = await self._collect_offers(client, search_url, diagnostic)
             if not offers:
                 return []
@@ -246,7 +262,11 @@ class AutoRuScraper(BaseScraper):
         if ref is not None:
             parts = [part for part in ref.path.split("/") if part]
             if "cars" in parts:
-                source_parts = parts[parts.index("cars") + 1 :]
+                source_parts = [
+                    part
+                    for part in parts[parts.index("cars") + 1 :]
+                    if part not in {"used", "new", "all"}
+                ]
                 if source_parts:
                     path = "/".join(source_parts)
         region = auto_ru_region_prefix(query.region)
@@ -266,6 +286,66 @@ class AutoRuScraper(BaseScraper):
             f"?year_from={query.effective_year_from}&year_to={query.effective_year_to}"
             f"&price_from={price_from}&price_to={price_to}{transmission}"
         )
+
+    async def _resolve_search_url(
+        self, client: httpx.AsyncClient, query: SearchRequest
+    ) -> tuple[str, bool]:
+        if self.catalog.source_model_ref(self.source, query.brand, query.model) is not None:
+            return self.build_search_url(query), True
+
+        identity = self.catalog.resolve_identity(query.brand, query.model)
+        root_url = f"{self.settings.auto_ru_base_url.rstrip('/')}/cars/used/"
+        root = await self._get(client, root_url)
+        brand_match: tuple[str, str] | None = None
+        root_soup = BeautifulSoup(root.content, "lxml")
+        for anchor in root_soup.find_all("a", href=True):
+            href = urljoin(root_url, str(anchor["href"])).split("?", 1)[0]
+            match = re.search(r"/cars/([^/]+)/used/?$", urlparse(href).path)
+            if match is None:
+                continue
+            label = anchor.get_text(" ", strip=True)
+            entry = self.catalog.brand_entry(label)
+            if entry is not None and str(entry["id"]) == identity.canonical_brand_id:
+                brand_match = (match.group(1), href)
+                break
+        if brand_match is None:
+            return self.build_search_url(query), False
+
+        brand_slug, brand_url = brand_match
+        brand_page = await self._get(client, brand_url)
+        model_match: tuple[str, str] | None = None
+        for anchor in BeautifulSoup(brand_page.content, "lxml").find_all("a", href=True):
+            href = urljoin(brand_url, str(anchor["href"])).split("?", 1)[0]
+            match = re.search(
+                rf"/cars/{re.escape(brand_slug)}/([^/]+)/(?:used|all)/?$",
+                urlparse(href).path,
+            )
+            if match is None:
+                continue
+            label = anchor.get_text(" ", strip=True)
+            candidates = (label, match.group(1))
+            if any(
+                self.catalog.resolve_identity(identity.brand, candidate).canonical_model_id
+                == identity.canonical_model_id
+                for candidate in candidates
+            ):
+                model_match = (match.group(1), href)
+                break
+        if model_match is None:
+            return self.build_search_url(query), False
+
+        model_slug, model_url = model_match
+        brand_ref = self._search_ref(brand_url, brand_slug)
+        model_ref = self._search_ref(model_url, model_slug)
+        await self.catalog.merge_source_mapping(
+            self.source, identity.brand, identity.model, brand_ref, model_ref
+        )
+        return self.build_search_url(query), True
+
+    @staticmethod
+    def _search_ref(url: str, slug: str) -> SourceReference:
+        parsed = urlparse(url)
+        return SourceReference(source="auto.ru", url=url, path=parsed.path, slug=slug)
 
     async def _collect_offers(
         self,
@@ -385,8 +465,8 @@ class AutoRuScraper(BaseScraper):
                 continue
             listing.raw_metadata.update(
                 {
-                    "region_scope": query.source_vehicle.region.value,
-                    "region_filter_guaranteed": query.source_vehicle.region.value
+                    "region_scope": region_value(query.source_vehicle.region),
+                    "region_filter_guaranteed": region_value(query.source_vehicle.region)
                     != "moscow_oblast",
                 }
             )
@@ -423,7 +503,7 @@ class AutoRuScraper(BaseScraper):
         if query.transmission != Transmission.ANY and transmission != query.transmission:
             raise _ListingRejected("transmission")
         location = cls._card_location(str(offer.get("location") or ""))
-        if query.region.value != "any" and location is None:
+        if region_value(query.region) != "any" and location is None:
             return None
         return CarListing(
             source=cls.source,
@@ -441,8 +521,8 @@ class AutoRuScraper(BaseScraper):
             checked_at=datetime.now(UTC),
             raw_metadata={
                 "marketplace_name": name,
-                "region_scope": query.region.value,
-                "region_filter_guaranteed": query.region.value != "moscow_oblast",
+                "region_scope": region_value(query.region),
+                "region_filter_guaranteed": region_value(query.region) != "moscow_oblast",
             },
         )
 
@@ -481,10 +561,19 @@ class AutoRuScraper(BaseScraper):
     async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
         try:
             response = await client.get(url)
-            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f"Auto.ru request timed out: {url}") from exc
         except httpx.HTTPError as exc:
-            raise ScraperParseError(f"Auto.ru request failed: {url}") from exc
+            raise ScraperError(f"Auto.ru network request failed: {url}") from exc
+        if response.status_code == 429:
+            raise Http429Error("Auto.ru rate-limited automated HTTP access")
+        if response.status_code == 403:
+            raise Http403Error("Auto.ru denied automated HTTP access")
         self._detect_interruption(response)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ScraperError(f"Auto.ru returned HTTP {response.status_code}") from exc
         return response
 
     @staticmethod
@@ -521,7 +610,38 @@ class AutoRuScraper(BaseScraper):
             offers = aggregate.get("offers")
             if isinstance(offers, list):
                 return [offer for offer in offers if isinstance(offer, dict)]
-        return []
+        offers: list[dict[str, Any]] = []
+        for card in soup.find_all(attrs={"data-seo": "listing-item"}):
+            anchor = next(
+                (item for item in card.find_all("a", href=True) if "/sale/" in str(item["href"])),
+                None,
+            )
+            if anchor is None:
+                continue
+            text = card.get_text(" ", strip=True)
+            price_node = card.find(attrs={"itemprop": "price"}) or card.find(
+                attrs={"data-testid": re.compile("price", re.I)}
+            )
+            raw_price = (
+                price_node.get("content")
+                if price_node is not None and price_node.get("content")
+                else price_node.get_text(" ", strip=True)
+                if price_node is not None
+                else text
+            )
+            try:
+                price = Normalizer.price(str(raw_price))
+            except ValueError:
+                continue
+            offers.append(
+                {
+                    "url": urljoin("https://auto.ru", str(anchor["href"])),
+                    "price": price,
+                    "name": anchor.get_text(" ", strip=True),
+                    "text": text,
+                }
+            )
+        return offers
 
     @staticmethod
     def _has_product_json_ld(content: bytes) -> bool:
@@ -544,8 +664,10 @@ class AutoRuScraper(BaseScraper):
         aliases = (ref.slug,) if ref is not None and ref.slug else ()
         listing = self.parse_detail(response.content, url, query, aliases)
         if listing is not None:
-            listing.raw_metadata["region_scope"] = query.region.value
-            listing.raw_metadata["region_filter_guaranteed"] = query.region.value != "moscow_oblast"
+            listing.raw_metadata["region_scope"] = region_value(query.region)
+            listing.raw_metadata["region_filter_guaranteed"] = (
+                region_value(query.region) != "moscow_oblast"
+            )
         return listing
 
     async def _load_discovered_listing(
@@ -561,9 +683,9 @@ class AutoRuScraper(BaseScraper):
         async with semaphore:
             response = await self._get(client, url)
         listing = self.parse_discovery_detail(response.content, url)
-        listing.raw_metadata["region_scope"] = query.source_vehicle.region.value
+        listing.raw_metadata["region_scope"] = region_value(query.source_vehicle.region)
         listing.raw_metadata["region_filter_guaranteed"] = (
-            query.source_vehicle.region.value != "moscow_oblast"
+            region_value(query.source_vehicle.region) != "moscow_oblast"
         )
         if listing.body_type not in query.body_types:
             raise _ListingRejected("body")
