@@ -213,6 +213,26 @@ def test_new_generation_markup_merges_sections_without_fabricating_years():
     assert unknown[0].year_to is None
 
 
+def test_generation_parser_accepts_nested_catalog_group_for_same_model():
+    html = b"""
+    <div><h3>Make Alpha, 2015 - present</h3>
+      <div data-ga-stats-name="generations_outlet_item">
+        <a href="/catalog/lcv/make/alpha/g_2015_1/">
+          <span data-ftid="component_article_caption">2015 - present</span>
+        </a>
+      </div>
+      <div data-ga-stats-name="generations_outlet_item">
+        <a href="/catalog/lcv/make/beta/g_2015_2/">Other model</a>
+      </div>
+    </div>
+    """
+    generations = CatalogEnrichmentService.parse_drom_year(
+        html, "Make", "Alpha", 2020, "https://www.drom.ru/catalog/make/alpha/"
+    )
+    assert len(generations) == 1
+    assert generations[0].source_refs[0].path == "/catalog/lcv/make/alpha/g_2015_1/"
+
+
 def test_generation_parser_scopes_cards_to_their_own_heading():
     html = b"""
     <div>
@@ -248,6 +268,52 @@ def test_full_offline_audit_reports_explicit_empty_status_and_alias_collision(tm
     assert any(error["type"] == "alias_collision" for error in audit_catalog(cache)["errors"])
 
 
+def test_catalog_completeness_audit_detects_missing_source_models():
+    class StaticCache:
+        def load(self):
+            return {
+                "brands": [
+                    {
+                        "id": "make",
+                        "name": "Make",
+                        "models": [
+                            {
+                                "id": f"make:{name.casefold()}",
+                                "name": name,
+                                "source_refs": [
+                                    {
+                                        "source": "drom.ru",
+                                        "url": f"https://www.drom.ru/catalog/make/{name.casefold()}/",
+                                        "path": f"/catalog/make/{name.casefold()}/",
+                                        "slug": name.casefold(),
+                                    }
+                                ],
+                            }
+                            for name in ("Alpha", "Beta")
+                        ],
+                    }
+                ]
+            }
+
+    cache = StaticCache()
+    without_index = audit_catalog(cache)
+    assert without_index["summary"]["source_index_available"] is False
+
+    report = audit_catalog(cache, {"drom.ru": {"make": 3}})
+    completeness = report["per_brand"][0]["source_model_completeness"]["drom.ru"]
+    assert completeness == {
+        "source_model_count": 3,
+        "stored_model_count": 2,
+        "stored_source_ref_count": 2,
+        "missing_model_count": 1,
+        "canonical_alias_collapses": 0,
+        "coverage_pct": 66.67,
+    }
+    assert report["summary"]["source_index_brands_with_gaps"] == 1
+    assert report["summary"]["source_index_missing_mappings"] == 1
+    assert any(error["type"] == "source_model_count_gap" for error in report["errors"])
+
+
 def test_resumable_enrichment_and_retry_failed(tmp_path, monkeypatch):
     cache = _catalog(tmp_path)
     calls = []
@@ -272,7 +338,7 @@ def test_resumable_enrichment_and_retry_failed(tmp_path, monkeypatch):
     assert _eligible(entry, retry_failed=True)
 
 
-def test_generation_filter_rejects_ambiguous_listing_identity(tmp_path):
+def test_generation_filter_accepts_unknown_but_rejects_known_mismatch(tmp_path):
     cache = _catalog(tmp_path)
     first = _generation("First", "sedan", 2010, "m1")
     second = first.model_copy(update={"id": "drom:g_2000_2", "name": "Second"})
@@ -300,6 +366,8 @@ def test_generation_filter_rejects_ambiguous_listing_identity(tmp_path):
         location="Москва",
         checked_at=datetime.now(UTC),
     )
+    assert service._source_rejection_reason(listing, query) is None
+    listing.canonical_generation_id = second.id
     assert service._source_rejection_reason(listing, query) == "generation"
     listing.canonical_generation_id = first.id
     assert service._source_rejection_reason(listing, query) is None

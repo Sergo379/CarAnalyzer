@@ -55,7 +55,7 @@ class CompetitorEngine:
     @staticmethod
     def segment_is_compatible(source: str | None, candidate: str | None) -> bool:
         if source is None or candidate is None:
-            return False
+            return True
         return source.strip().casefold() == candidate.strip().casefold()
 
     def classify_price(self, source_price: int, candidate_price: int) -> CompetitorCategory | None:

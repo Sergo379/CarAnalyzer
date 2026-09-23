@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from backend.models.car import BodyType
-from backend.services.marketplace_catalog import CatalogCache
+from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.normalizer import Normalizer
 
 
@@ -22,7 +22,7 @@ class VehicleCatalog:
     """Stable catalog classifier; it never writes to the knowledge database."""
 
     def __init__(self, cache: CatalogCache | None = None) -> None:
-        self.cache = cache or CatalogCache()
+        self.cache = cache or get_catalog_cache()
 
     def classify(
         self,

@@ -23,7 +23,7 @@ from backend.scrapers.base import (
     ScraperError,
     ScraperParseError,
 )
-from backend.services.marketplace_catalog import CatalogCache
+from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.normalizer import Normalizer
 from backend.services.regions import auto_ru_region_prefix, region_value
 
@@ -89,7 +89,7 @@ class AutoRuScraper(BaseScraper):
     ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
-        self.catalog = catalog or CatalogCache()
+        self.catalog = catalog or get_catalog_cache()
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
         started = time.perf_counter()
@@ -111,8 +111,9 @@ class AutoRuScraper(BaseScraper):
             limits=limits,
             transport=self.transport,
         ) as client:
-            search_url, model_specific = await self._resolve_search_url(client, query)
-            diagnostic = self.reset_diagnostics("target", search_url)
+            diagnostic = self.reset_diagnostics("target")
+            search_url, model_specific = await self._resolve_search_url(client, query, diagnostic)
+            diagnostic.resolved_url = search_url
             diagnostic.resolved_urls.append(search_url)
             if not model_specific:
                 diagnostic.degraded = True
@@ -208,23 +209,70 @@ class AutoRuScraper(BaseScraper):
             )
             if discovery_urls:
                 diagnostic.resolved_url = discovery_urls[0]
-            batches = await asyncio.gather(
-                *(self._collect_offers(client, url, diagnostic) for url in discovery_urls)
+            route_offers: list[list[dict[str, Any]]] = [[] for _ in discovery_urls]
+            route_tasks = [
+                asyncio.create_task(
+                    self._collect_offers(client, url, diagnostic, route_offers[index])
+                )
+                for index, url in enumerate(discovery_urls)
+            ]
+            done, pending = await asyncio.wait(
+                route_tasks, timeout=self.settings.auto_ru_discovery_collection_seconds
             )
-            for parsed in batches:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            route_errors: list[Exception] = []
+            for task in done:
+                try:
+                    task.result()
+                except Exception as exc:
+                    route_errors.append(exc)
+            if pending:
+                route_errors.extend(
+                    TimeoutError("Auto.ru discovery route timed out") for _ in pending
+                )
+            if route_errors:
+                diagnostic.partial_failures += len(route_errors)
+                diagnostic.degraded = True
+                diagnostic.notes.extend(
+                    f"route failure: {type(error).__name__}" for error in route_errors
+                )
+            for parsed in route_offers:
                 for offer in parsed:
                     url = offer.get("url")
                     if isinstance(url, str) and url not in seen_urls:
                         seen_urls.add(url)
                         offers.append(offer)
+            if not offers and route_errors and len(route_errors) == len(route_tasks):
+                raise route_errors[0]
 
             fast, fallback = self._parse_discovery_cards(offers, query, diagnostic)
             semaphore = asyncio.Semaphore(self.settings.scraper_detail_concurrency)
             diagnostic.detail_requests += len(fallback)
             tasks = [
-                self._load_discovered_listing(client, semaphore, offer, query) for offer in fallback
+                asyncio.create_task(self._load_discovered_listing(client, semaphore, offer, query))
+                for offer in fallback
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results: list[CarListing | _ListingRejected | BaseException | None] = []
+            if tasks:
+                done, pending = await asyncio.wait(
+                    tasks, timeout=self.settings.auto_ru_discovery_detail_seconds
+                )
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    diagnostic.partial_failures += len(pending)
+                    diagnostic.degraded = True
+                    diagnostic.notes.append(f"detail timeout: {len(pending)}")
+                for task in tasks:
+                    if task in done:
+                        try:
+                            results.append(task.result())
+                        except BaseException as exc:
+                            results.append(exc)
 
         listings: list[CarListing] = []
         detail_errors: list[Exception] = []
@@ -288,14 +336,14 @@ class AutoRuScraper(BaseScraper):
         )
 
     async def _resolve_search_url(
-        self, client: httpx.AsyncClient, query: SearchRequest
+        self, client: httpx.AsyncClient, query: SearchRequest, diagnostic=None
     ) -> tuple[str, bool]:
         if self.catalog.source_model_ref(self.source, query.brand, query.model) is not None:
             return self.build_search_url(query), True
 
         identity = self.catalog.resolve_identity(query.brand, query.model)
         root_url = f"{self.settings.auto_ru_base_url.rstrip('/')}/cars/used/"
-        root = await self._get(client, root_url)
+        root = await self._get(client, root_url, diagnostic)
         brand_match: tuple[str, str] | None = None
         root_soup = BeautifulSoup(root.content, "lxml")
         for anchor in root_soup.find_all("a", href=True):
@@ -312,7 +360,7 @@ class AutoRuScraper(BaseScraper):
             return self.build_search_url(query), False
 
         brand_slug, brand_url = brand_match
-        brand_page = await self._get(client, brand_url)
+        brand_page = await self._get(client, brand_url, diagnostic)
         model_match: tuple[str, str] | None = None
         for anchor in BeautifulSoup(brand_page.content, "lxml").find_all("a", href=True):
             href = urljoin(brand_url, str(anchor["href"])).split("?", 1)[0]
@@ -352,14 +400,23 @@ class AutoRuScraper(BaseScraper):
         client: httpx.AsyncClient,
         initial_url: str,
         diagnostic,
+        partial_offers: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         offers: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         url: str | None = initial_url
-        for _ in range(self.settings.scraper_max_pages):
+        for _ in range(self.settings.live_search_max_pages):
             if url is None:
                 break
-            response = await self._get(client, url)
+            try:
+                response = await self._get(client, url, diagnostic)
+            except Exception as exc:
+                if not offers:
+                    raise
+                diagnostic.partial_failures += 1
+                diagnostic.degraded = True
+                diagnostic.notes.append(f"page failure: {type(exc).__name__}")
+                break
             diagnostic.pages_scanned += 1
             parsed = self.parse_search_offers(response.content)
             self._attach_card_data(parsed, response.content)
@@ -370,6 +427,8 @@ class AutoRuScraper(BaseScraper):
                 if isinstance(offer_url, str) and offer_url not in seen_urls:
                     seen_urls.add(offer_url)
                     offers.append(offer)
+                    if partial_offers is not None:
+                        partial_offers.append(offer)
                     new_count += 1
                     if len(offers) >= self.settings.scraper_max_listings:
                         return offers
@@ -558,7 +617,9 @@ class AutoRuScraper(BaseScraper):
         value = _AUTO_TRANSMISSIONS.get(transmission)
         return f"&transmission={value}" if value else ""
 
-    async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
+    async def _get(self, client: httpx.AsyncClient, url: str, diagnostic=None) -> httpx.Response:
+        if diagnostic is not None:
+            diagnostic.http_requests += 1
         try:
             response = await client.get(url)
         except httpx.TimeoutException as exc:
@@ -659,7 +720,7 @@ class AutoRuScraper(BaseScraper):
         if not isinstance(url, str) or not url.startswith("https://auto.ru/"):
             return None
         async with semaphore:
-            response = await self._get(client, url)
+            response = await self._get(client, url, self.diagnostics.get("target"))
         ref = self.catalog.source_model_ref("auto.ru", query.brand, query.model)
         aliases = (ref.slug,) if ref is not None and ref.slug else ()
         listing = self.parse_detail(response.content, url, query, aliases)
@@ -681,7 +742,7 @@ class AutoRuScraper(BaseScraper):
         if not isinstance(url, str) or not url.startswith("https://auto.ru/"):
             return None
         async with semaphore:
-            response = await self._get(client, url)
+            response = await self._get(client, url, self.diagnostics.get("competitors"))
         listing = self.parse_discovery_detail(response.content, url)
         listing.raw_metadata["region_scope"] = region_value(query.source_vehicle.region)
         listing.raw_metadata["region_filter_guaranteed"] = (

@@ -45,7 +45,7 @@ class AvitoScraper(BaseScraper):
         self.transport = transport
         self.browser_checker = browser_checker or self._load_rendered_content
         self._browser_lock = asyncio.Lock()
-        self._browser_error: ScraperError | None = None
+        self._browser_error: Exception | None = None
         self._browser_pages: dict[str, bytes] = {}
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
@@ -92,15 +92,13 @@ class AvitoScraper(BaseScraper):
             transport=self.transport,
         ) as client:
             try:
+                diagnostic.http_requests += 1
                 response = await client.get(url)
             except httpx.TimeoutException as exc:
                 raise TimeoutError("Avito HTTP request timed out") from exc
             except httpx.HTTPError as exc:
                 raise ScraperError("Avito HTTP request failed") from exc
-        try:
-            self._detect_interruption(response)
-        except (Http429Error, Http403Error):
-            return await self._browser_content(url, diagnostic)
+        self._detect_interruption(response)
         if self._has_listing_cards(response.content):
             return response.content
         return await self._browser_content(url, diagnostic)
@@ -113,7 +111,13 @@ class AvitoScraper(BaseScraper):
                 return self._browser_pages[url]
             try:
                 diagnostic.browser_fallbacks += 1
-                content = await self.browser_checker(url)
+                content = await asyncio.wait_for(
+                    self.browser_checker(url),
+                    timeout=self.settings.avito_browser_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                self._browser_error = TimeoutError("Avito browser fallback timed out")
+                raise self._browser_error from exc
             except ScraperError as exc:
                 self._browser_error = exc
                 raise
@@ -289,12 +293,14 @@ class AvitoScraper(BaseScraper):
         title = soup.title.get_text(" ", strip=True).casefold() if soup.title else ""
         visible_text = soup.get_text(" ", strip=True).casefold()
         final_url = str(response.url).casefold()
-        if response.status_code == 429 or "доступ ограничен" in title:
+        if response.status_code == 429:
             raise Http429Error("Avito limited automated HTTP access: HTTP 429")
-        if "captcha" in final_url or "проверка, что вы не робот" in visible_text:
-            raise CaptchaRequiredError("Avito requires a manual CAPTCHA check")
         if response.status_code == 403:
             raise Http403Error("Avito access denied: HTTP 403")
+        if "captcha" in final_url or "проверка, что вы не робот" in visible_text:
+            raise CaptchaRequiredError("Avito requires a manual CAPTCHA check")
+        if "доступ ограничен" in title:
+            raise Http429Error("Avito limited automated HTTP access")
         if response.status_code == 401 or "/login" in final_url:
             raise AuthenticationRequiredError("Avito authentication is required")
         try:

@@ -19,7 +19,7 @@ const result = {
       competitors: { state: "timeout", count: 0, detail: "timeout", elapsed_seconds: 30 },
     },
     "drom.ru": {
-      target: { state: "ok", count: 1, detail: "Работает", elapsed_seconds: 1 },
+      target: { state: "empty", count: 0, detail: "Подходящих объявлений нет", elapsed_seconds: 1 },
       competitors: { state: "ok", count: 2, detail: "Работает", elapsed_seconds: 2 },
     },
   },
@@ -38,7 +38,7 @@ const result = {
     model_groups: [],
   },
   source_model_group: null,
-  source_distribution: { "auto.ru": 1, "drom.ru": 1 },
+  source_distribution: { "auto.ru": 1, "drom.ru": 0 },
   source_diagnostics: {}, source_operation_diagnostics: {}, pipeline_diagnostics: {},
   direct: { listings: [], model_groups: [] },
   expensive: { listings: [], model_groups: [] },
@@ -169,7 +169,8 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
     fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
     fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
-    await waitFor(() => expect(screen.getAllByText(/рынок — работает · 1/)).toHaveLength(2));
+    await waitFor(() => expect(screen.getByText(/рынок — работает · 1/)).toBeInTheDocument());
+    expect(screen.getByText(/рынок — работает, результатов нет · 0/)).toBeInTheDocument();
     expect(screen.getByText(/конкуренты — превышен лимит времени · 0/)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: /Открыть/ });
     expect(link).toHaveAttribute("href", result.source_listings.listings[0].listing.url);

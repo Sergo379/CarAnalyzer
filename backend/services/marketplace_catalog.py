@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urljoin, urlparse
@@ -116,7 +117,9 @@ class PublicHtmlCatalogSource:
     async def fetch(self) -> SourceCatalog:
         limits = httpx.Limits(max_connections=self.concurrency)
         async with httpx.AsyncClient(
-            headers={"User-Agent": USER_AGENT},
+            # The public index currently renders brand anchors for this minimal
+            # identifier; a fabricated Chrome signature can return a JS shell.
+            headers={"User-Agent": "Mozilla/5.0"},
             follow_redirects=True,
             timeout=self.timeout,
             limits=limits,
@@ -199,6 +202,8 @@ def auto_ru_source() -> PublicHtmlCatalogSource:
         name="auto.ru",
         index_url="https://auto.ru/catalog/cars/",
         brand_prefix=("catalog", "cars"),
+        excluded_brand_names=frozenset({"китайские", "спортивные авто и реплики"}),
+        excluded_model_slugs=frozenset({"engine", "photo"}),
     )
 
 
@@ -239,10 +244,18 @@ def _strip_brand_prefix(name: str, brand: str) -> str:
 
 
 def _model_key(value: str) -> str:
-    normalized = value.casefold().replace("серии", "series").replace("серия", "series")
+    normalized = _semantic_model_text(value)
     key = _key(normalized)
     match = re.fullmatch(r"(\d+)er", key)
     return f"{match.group(1)}series" if match else key
+
+
+def _semantic_model_text(value: str) -> str:
+    """Keep punctuation that distinguishes model identities, without name lists."""
+    folded = value.casefold().replace("серии", "series").replace("серия", "series")
+    folded = folded.replace("+", "plus")
+    folded = re.sub(r"(?<=\d)-(?=\d)", "dash", folded)
+    return re.sub(r"(?<=[0-9a-zа-яё])/(?=[0-9a-zа-яё])", "slash", folded)
 
 
 _CYRILLIC_TO_LATIN = str.maketrans(
@@ -287,7 +300,7 @@ _CYRILLIC_TO_LATIN = str.maketrans(
 def _identity_keys(value: str) -> frozenset[str]:
     """Exact language/script-normalized keys; never prefix/substring guesses."""
 
-    folded = value.casefold().replace("серии", "series").replace("серия", "series")
+    folded = _semantic_model_text(value)
     compact = _key(folded)
     # Russian loan spelling "рей" and English "ray" are phonetic equivalents.
     phonetic = folded.replace("ей", "ай").translate(_CYRILLIC_TO_LATIN)
@@ -360,6 +373,14 @@ class CatalogCache:
         canonical_id_matches = [entry for entry in entries if str(entry.get("id")) == model]
         if len(canonical_id_matches) == 1:
             return canonical_id_matches[0]
+
+        # The selector submits the stored display name. It must win over an
+        # unrelated model's historical source slug with the same loose spelling.
+        exact_name_matches = [
+            entry for entry in entries if str(entry.get("name", "")).casefold() == model.casefold()
+        ]
+        if len(exact_name_matches) == 1:
+            return exact_name_matches[0]
 
         # Stable source slugs/paths take priority over display strings.
         source_matches = []
@@ -831,6 +852,13 @@ class CatalogCache:
         return None
 
 
+@lru_cache(maxsize=1)
+def get_catalog_cache() -> CatalogCache:
+    """Share reads while retaining CatalogCache's mtime-based reload behavior."""
+
+    return CatalogCache()
+
+
 class CatalogSyncService:
     def __init__(
         self,
@@ -857,6 +885,14 @@ class CatalogSyncService:
                 "No marketplace catalog source was available; local cache was preserved"
             )
 
+        # A stored source URL is a stronger identity than a display-name key.
+        # This also keeps legacy canonical IDs stable after collision repair.
+        existing_refs = {
+            (str(ref.get("source")), str(ref.get("url"))): str(model["id"])
+            for brand in self.cache.load().get("brands", [])
+            for model in brand.get("models", [])
+            for ref in model.get("source_refs", [])
+        }
         merged: dict[str, CatalogBrand] = {}
         model_maps: dict[str, dict[str, CatalogModel]] = {}
         for result in available:
@@ -874,9 +910,14 @@ class CatalogSyncService:
                 for source_model in source_brand.models:
                     model_name = _strip_brand_prefix(source_model.name, source_brand.name)
                     key = _model_key(model_name)
+                    model_id = existing_refs.get(
+                        (result.source, source_model.url), f"{brand_key}:{key}"
+                    )
+                    if not model_id.startswith(f"{brand_key}:"):
+                        model_id = f"{brand_key}:{key}"
                     model = models.setdefault(
-                        key,
-                        CatalogModel(id=f"{brand_key}:{key}", name=model_name, source_refs=[]),
+                        model_id,
+                        CatalogModel(id=model_id, name=model_name, source_refs=[]),
                     )
                     if model_name != model.name and model_name not in model.aliases:
                         model.aliases.append(model_name)
@@ -958,6 +999,8 @@ class CatalogEnrichmentService:
         entry = self.cache.model_entry(brand, model)
         if entry is None:
             return "source_unavailable"
+        if self.cache.source_model_ref("drom.ru", brand, model) is None:
+            return "source_not_supported_for_details"
         if self.cache.details_are_fresh_window(brand, model, 0, 0):
             return str(
                 entry.get(
@@ -998,10 +1041,7 @@ class CatalogEnrichmentService:
             )
         ref = self.cache.source_model_ref("drom.ru", brand, model)
         if ref is None:
-            await self.cache.merge_model_observation(
-                brand, model, "source_unavailable", error_type="missing_drom_ref"
-            )
-            return "source_unavailable"
+            return "source_not_supported_for_details"
         url = ref.url.rstrip("/") + "/"
         try:
             response = await client.get(url)
@@ -1127,7 +1167,14 @@ class CatalogEnrichmentService:
                 if not isinstance(link, Tag):
                     continue
                 generation_url = urljoin(page_url, str(link.get("href")))
-                if not re.search(r"/catalog/[^/]+/[^/]+/g_[^/]+/$", generation_url):
+                page_parts = PublicHtmlCatalogSource._path_parts(page_url)
+                generation_parts = PublicHtmlCatalogSource._path_parts(generation_url)
+                if (
+                    urlparse(generation_url).netloc != urlparse(page_url).netloc
+                    or len(generation_parts) < 3
+                    or not generation_parts[-1].startswith("g_")
+                    or generation_parts[-3:-1] != page_parts[-2:]
+                ):
                     continue
                 caption = card.find(attrs={"data-ftid": "component_article_caption"})
                 period_text = caption.get_text(" ", strip=True) if isinstance(caption, Tag) else ""

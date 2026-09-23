@@ -25,7 +25,7 @@ from backend.scrapers.base import (
     HttpAutomationLimitedError,
     ScraperParseError,
 )
-from backend.services.marketplace_catalog import CatalogCache
+from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.normalizer import Normalizer
 from backend.services.regions import drom_region_prefix, drom_region_query
 
@@ -58,7 +58,7 @@ class DromScraper(BaseScraper):
     ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
-        self.catalog = catalog or CatalogCache()
+        self.catalog = catalog or get_catalog_cache()
         self.browser_loader = browser_loader or self._load_in_isolated_browser
         self._browser_lock = asyncio.Lock()
         self._browser_error: BrowserAccessLimitedError | None = None
@@ -67,8 +67,6 @@ class DromScraper(BaseScraper):
         self._client: httpx.AsyncClient | None = None
         self._session_users = 0
         self._last_request_at = 0.0
-        self._target_active = False
-        self._target_first_page = asyncio.Event()
         self._source_limited: Exception | None = None
         self._playwright = None
         self._browser = None
@@ -106,13 +104,13 @@ class DromScraper(BaseScraper):
                 await asyncio.sleep(delay)
             self._last_request_at = monotonic()
             diagnostic.http_requests += 1
-            try:
-                response = await client.get(url)
-            except httpx.HTTPError as exc:
-                raise ScraperParseError("Drom request failed") from exc
-            if response.status_code == 429:
-                self._source_limited = Http429Error("Drom rate limited automated HTTP (429)")
-            return response
+        try:
+            response = await client.get(url)
+        except httpx.HTTPError as exc:
+            raise ScraperParseError("Drom request failed") from exc
+        if response.status_code == 429:
+            self._source_limited = Http429Error("Drom rate limited automated HTTP (429)")
+        return response
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
         target_queries = self._target_body_queries(query)
@@ -126,66 +124,56 @@ class DromScraper(BaseScraper):
         identity = self.catalog.resolve_identity(query.brand, query.model)
         model_ref = self.catalog.source_model_ref("drom.ru", identity.brand, identity.model)
         expected_slug = model_ref.slug if model_ref else None
-        self._target_active = True
-        self._target_first_page.clear()
-        try:
-            async with self._session() as client:
-                for initial_url, target_query in target_by_url.items():
-                    diagnostic.routes_attempted += 1
-                    url: str | None = initial_url
-                    route_seen: set[str] = set()
-                    try:
-                        for _ in range(self.settings.scraper_max_pages):
-                            if url is None:
+        async with self._session() as client:
+            for initial_url, target_query in target_by_url.items():
+                diagnostic.routes_attempted += 1
+                url: str | None = initial_url
+                route_seen: set[str] = set()
+                try:
+                    for _ in range(self.settings.live_search_max_pages):
+                        if url is None:
+                            break
+                        response = await self._get(client, url, diagnostic)
+                        content = await self._content_with_fallback(response, url, diagnostic)
+                        diagnostic.pages_scanned += 1
+                        raw = self._card_count(content)
+                        diagnostic.raw_count += raw
+                        parsed = self.parse_search(
+                            content,
+                            target_query,
+                            body_resolver=lambda subtitle, year: self._catalog_body_type(
+                                query, subtitle, year
+                            ),
+                            expected_model_slug=expected_slug,
+                            diagnostic=diagnostic,
+                        )
+                        diagnostic.parsed_count += len(parsed)
+                        new_count = 0
+                        for listing in parsed:
+                            if listing.external_id in seen:
+                                diagnostic.rejected["duplicate"] = (
+                                    diagnostic.rejected.get("duplicate", 0) + 1
+                                )
+                                continue
+                            seen.add(listing.external_id)
+                            route_seen.add(listing.external_id)
+                            listings.append(listing)
+                            new_count += 1
+                            if len(listings) >= self.settings.scraper_max_listings:
                                 break
-                            response = await self._get(client, url, diagnostic)
-                            content = await self._content_with_fallback(response, url, diagnostic)
-                            self._target_first_page.set()
-                            diagnostic.pages_scanned += 1
-                            raw = self._card_count(content)
-                            diagnostic.raw_count += raw
-                            parsed = self.parse_search(
-                                content,
-                                target_query,
-                                body_resolver=lambda subtitle, year: self._catalog_body_type(
-                                    query, subtitle, year
-                                ),
-                                expected_model_slug=expected_slug,
-                                diagnostic=diagnostic,
-                            )
-                            diagnostic.parsed_count += len(parsed)
-                            new_count = 0
-                            for listing in parsed:
-                                if listing.external_id in seen:
-                                    diagnostic.rejected["duplicate"] = (
-                                        diagnostic.rejected.get("duplicate", 0) + 1
-                                    )
-                                    continue
-                                seen.add(listing.external_id)
-                                route_seen.add(listing.external_id)
-                                listings.append(listing)
-                                new_count += 1
-                                if len(listings) >= self.settings.scraper_max_listings:
-                                    break
-                            if (
-                                len(listings) >= self.settings.scraper_max_listings
-                                or new_count == 0
-                            ):
-                                break
-                            next_url = self._next_page_url(content, str(response.url))
-                            if next_url == url or next_url is None:
-                                break
-                            url = next_url
-                    except Exception as exc:
-                        failures.append(exc)
-                        diagnostic.partial_failures += 1
-                        diagnostic.degraded = True
-                        diagnostic.notes.append(f"route failure: {type(exc).__name__}")
-                    if len(listings) >= self.settings.scraper_max_listings:
-                        break
-        finally:
-            self._target_first_page.set()
-            self._target_active = False
+                        if len(listings) >= self.settings.scraper_max_listings or new_count == 0:
+                            break
+                        next_url = self._next_page_url(content, str(response.url))
+                        if next_url == url or next_url is None:
+                            break
+                        url = next_url
+                except Exception as exc:
+                    failures.append(exc)
+                    diagnostic.partial_failures += 1
+                    diagnostic.degraded = True
+                    diagnostic.notes.append(f"route failure: {type(exc).__name__}")
+                if len(listings) >= self.settings.scraper_max_listings:
+                    break
         diagnostic.accepted_count = len(listings)
         if failures and not listings and len(failures) == len(target_by_url):
             raise failures[0]
@@ -201,11 +189,6 @@ class DromScraper(BaseScraper):
         listings: list[CarListing] = []
         seen: set[str] = set()
         failures: list[Exception] = []
-        if self._target_active:
-            try:
-                await asyncio.wait_for(self._target_first_page.wait(), timeout=8)
-            except TimeoutError:
-                diagnostic.notes.append("target first page still pending")
         async with self._session() as client:
             routes: dict[str, BodyType | None] = {}
             if query.body_types == frozenset(BodyType):
@@ -224,7 +207,7 @@ class DromScraper(BaseScraper):
                 route_seen: set[str] = set()
                 url: str | None = initial_url
                 diagnostic.routes_attempted += 1
-                for _ in range(self.settings.scraper_max_pages):
+                for _ in range(self.settings.live_search_max_pages):
                     if url is None:
                         break
                     response = await self._get(client, url, diagnostic)

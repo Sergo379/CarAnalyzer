@@ -337,6 +337,41 @@ def test_body_any_discovery_uses_one_broad_route() -> None:
     assert len(listings) == 1
 
 
+def test_slow_target_request_does_not_hold_discovery_request_lock() -> None:
+    target_started = asyncio.Event()
+    release_target = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "/bmw/" in request.url.path:
+            target_started.set()
+            await release_target.wait()
+        return httpx.Response(200, content=search_html(), request=request)
+
+    scraper = DromScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"sedan"},
+    )
+
+    async def run() -> None:
+        target = asyncio.create_task(scraper.search(QUERY))
+        try:
+            await asyncio.wait_for(target_started.wait(), timeout=0.2)
+            competitors = await asyncio.wait_for(scraper.discover(discovery), timeout=0.2)
+            assert competitors
+        finally:
+            release_target.set()
+            await target
+
+    asyncio.run(run())
+
+
 def test_malformed_target_card_is_rejected_individually() -> None:
     malformed = b'<div data-ftid="bulls-list_bull"><span>broken</span></div>'
     scraper = DromScraper(
@@ -384,15 +419,18 @@ def test_rate_limit_circuit_prevents_target_discovery_request_storm() -> None:
     assert len(calls) == 1
 
 
-def test_drom_follows_next_page_and_stops_without_it() -> None:
+def test_drom_live_search_stops_after_bounded_second_page() -> None:
     first_page = search_html().replace(
         b"</body>", b'<a rel="next" href="/bmw/5-series/page2/">Next</a></body>'
     )
     second_page = (
         search_html().replace(b"837871166", b"837871169").replace(b"837871167", b"837871170")
+        .replace(b"</body>", b'<a rel="next" href="/bmw/5-series/page3/">Next</a></body>')
     )
+    calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
         content = second_page if "page2" in request.url.path else first_page
         return httpx.Response(200, content=content, request=request)
 
@@ -404,6 +442,7 @@ def test_drom_follows_next_page_and_stops_without_it() -> None:
     listings = asyncio.run(scraper.search(QUERY))
     assert {item.external_id for item in listings} == {"837871166", "837871169"}
     assert scraper.combined_diagnostics().pages_scanned == 2
+    assert not any("page3" in url for url in calls)
 
 
 def test_drom_uses_supported_year_path_and_native_price_range() -> None:

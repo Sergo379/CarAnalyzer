@@ -224,6 +224,82 @@ def test_discovery_deduplicates_compatible_body_urls() -> None:
     assert len(calls) == 1
 
 
+def test_discovery_preserves_successful_route_when_another_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "body-wagon" in request.url.path:
+            return httpx.Response(500, request=request)
+        return httpx.Response(200, content=search_card_html(), request=request)
+
+    scraper = AutoRuScraper(
+        settings=Settings(_env_file=None),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"sedan", "wagon"},
+    )
+    listings = asyncio.run(scraper.discover(discovery))
+    assert listings
+    assert scraper.diagnostics["competitors"].degraded
+    assert scraper.diagnostics["competitors"].partial_failures == 1
+    assert scraper.diagnostics["competitors"].http_requests == 2
+
+
+def test_discovery_keeps_first_page_when_following_page_stalls() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            await asyncio.sleep(0.1)
+            return httpx.Response(200, content=b"<html></html>", request=request)
+        content = search_card_html().replace(
+            b"</html>", b'<link rel="next" href="?page=2"></html>'
+        )
+        return httpx.Response(200, content=content, request=request)
+
+    scraper = AutoRuScraper(
+        settings=Settings(
+            _env_file=None, auto_ru_discovery_collection_seconds=0.02
+        ),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"sedan"},
+    )
+    listings = asyncio.run(scraper.discover(discovery))
+    assert [item.external_id for item in listings] == ["1134567890"]
+    assert scraper.diagnostics["competitors"].degraded
+    assert scraper.diagnostics["competitors"].partial_failures == 1
+
+
+def test_discovery_bounds_slow_detail_fallback() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "/sale/" in request.url.path:
+            await asyncio.sleep(0.1)
+            return httpx.Response(200, content=detail_html(), request=request)
+        return httpx.Response(200, content=search_html(), request=request)
+
+    scraper = AutoRuScraper(
+        settings=Settings(_env_file=None, auto_ru_discovery_detail_seconds=0.02),
+        transport=httpx.MockTransport(handler),
+        catalog=FakeCatalog(),  # type: ignore[arg-type]
+    )
+    discovery = MarketDiscoveryRequest(
+        source_vehicle=QUERY,
+        price_from=3_280_000,
+        price_to=4_920_000,
+        body_types={"sedan"},
+    )
+    assert asyncio.run(scraper.discover(discovery)) == []
+    assert scraper.diagnostics["competitors"].degraded
+    assert scraper.diagnostics["competitors"].partial_failures == 1
+
+
 def test_auto_ru_region_and_transmission_are_part_of_search_url() -> None:
     query = SearchRequest(
         brand="Renault",
@@ -249,8 +325,9 @@ def test_discovery_detail_keeps_family_and_modification() -> None:
     assert "520i" in listing.modification
 
 
-def test_auto_ru_follows_explicit_next_page() -> None:
+def test_auto_ru_live_search_stops_after_bounded_second_page() -> None:
     second_url = DETAIL_URL.replace("1134567890", "1134567891")
+    calls: list[str] = []
 
     def result_page(url: str, next_url: str | None = None) -> bytes:
         payload = {
@@ -266,10 +343,11 @@ def test_auto_ru_follows_explicit_next_page() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        calls.append(url)
         if "/sale/" in request.url.path:
             content = detail_html().replace(DETAIL_URL.encode(), url.encode())
         elif request.url.params.get("page") == "2":
-            content = result_page(second_url)
+            content = result_page(second_url, "https://auto.ru/cars/bmw/used/?page=3")
         else:
             content = result_page(DETAIL_URL, "https://auto.ru/cars/bmw/used/?page=2")
         return httpx.Response(200, content=content, request=request)
@@ -280,3 +358,4 @@ def test_auto_ru_follows_explicit_next_page() -> None:
     listings = asyncio.run(scraper.search(QUERY))
     assert {item.external_id for item in listings} == {"1134567890", "1134567891"}
     assert scraper.combined_diagnostics().pages_scanned == 2
+    assert not any("page=3" in url for url in calls)

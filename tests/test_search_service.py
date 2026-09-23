@@ -6,6 +6,7 @@ import pytest
 from backend.models.car import BodyType, MarketDiscoveryRequest, SearchRequest
 from backend.models.listing import CarListing
 from backend.scrapers.base import BaseScraper, Http429Error, SourceBlockedError
+from backend.services.marketplace_catalog import CatalogCache
 from backend.services.search_service import SearchService, SourceState
 
 
@@ -90,6 +91,56 @@ def listing(source: str, external_id: str, price: int) -> CarListing:
     )
 
 
+def synthetic_listing(
+    source: str,
+    external_id: str,
+    brand: str,
+    model: str,
+    *,
+    year: int = 2022,
+    location: str | None = None,
+) -> CarListing:
+    return CarListing(
+        source=source,
+        external_id=external_id,
+        brand=brand,
+        model=model,
+        year=year,
+        body_type="sedan",
+        price=1_000_000,
+        url=f"https://example.test/{source}/{external_id}",
+        location=location,
+        checked_at=datetime.now(UTC),
+    )
+
+
+def test_search_service_injects_one_catalog_cache_into_all_readers(tmp_path, monkeypatch) -> None:
+    import backend.services.marketplace_catalog as catalog_module
+
+    path = tmp_path / "catalog.json"
+    path.write_text('{"version":3,"sources":{},"brands":[]}', encoding="utf-8")
+    cache = CatalogCache(path=path)
+    loads = 0
+    original = catalog_module.json.loads
+
+    def counted_loads(value: str):
+        nonlocal loads
+        loads += 1
+        return original(value)
+
+    monkeypatch.setattr(catalog_module.json, "loads", counted_loads)
+    service = SearchService(marketplace_catalog=cache)
+    assert service.catalog.cache is cache
+    assert service.marketplace_catalog is cache
+    assert service.scrapers[0].catalog is cache  # Auto.ru
+    assert service.scrapers[1].catalog is cache  # Drom
+    service.catalog.cache.load()
+    service.marketplace_catalog.load()
+    service.scrapers[0].catalog.load()
+    service.scrapers[1].catalog.load()
+    assert loads == 1
+
+
 @pytest.mark.parametrize(
     ("price", "category"),
     [(4_100_000, "direct"), (4_700_000, "expensive"), (3_500_000, "cheaper")],
@@ -120,6 +171,215 @@ def test_partial_source_failure_keeps_successful_data() -> None:
     assert result.source_status == {"auto.ru": SourceState.OK, "avito": SourceState.BLOCKED}
     assert len(result.direct.listings) == 1
     assert result.warnings
+
+
+def test_auto_failure_does_not_stop_drom() -> None:
+    class FailedAuto(BaseScraper):
+        source = "auto.ru"
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            raise SourceBlockedError("unavailable")
+
+    result = asyncio.run(
+        SearchService(
+            scrapers=[
+                StaticScraper("drom.ru", [listing("drom.ru", "1", 4_100_000)]),
+                FailedAuto(),
+            ]
+        ).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status["auto.ru"] == SourceState.BLOCKED
+    assert result.source_status["drom.ru"] == SourceState.OK
+    assert len(result.source_listings.listings) == 1
+
+
+def test_avito_restriction_preserves_auto_and_drom_results() -> None:
+    result = asyncio.run(
+        SearchService(
+            scrapers=[
+                BlockedScraper(),
+                StaticScraper("drom.ru", [listing("drom.ru", "2", 4_100_000)]),
+                StaticScraper("auto.ru", [listing("auto.ru", "1", 4_100_000)]),
+            ]
+        ).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert result.source_status["avito"] == SourceState.BLOCKED
+    assert result.source_status["auto.ru"] == SourceState.OK
+    assert result.source_status["drom.ru"] == SourceState.OK
+    assert len(result.source_listings.listings) == 2
+    assert result.source_operations["auto.ru"]["target"].count == 1
+    assert result.source_operations["drom.ru"]["target"].count == 1
+
+
+@pytest.mark.parametrize(
+    ("brand", "model"), [("Example Make", "Alpha+"), ("Second Make", "Beta-X")]
+)
+def test_valid_target_count_matches_final_source_collection(brand: str, model: str) -> None:
+    scraper = SourceAndBroadScraper(
+        [synthetic_listing("target.test", "1", brand, model)], []
+    )
+    result = asyncio.run(
+        SearchService(scrapers=[scraper]).search(
+            SearchRequest(
+                brand=brand,
+                model=model,
+                year=2022,
+                body_type="any",
+                transmission="any",
+                region="any",
+                price=1_000_000,
+            )
+        )
+    )
+    assert len(result.source_listings.listings) == 1
+    assert result.source_operations["broad"]["target"].count == 1
+    assert result.source_distribution["target.test"] == 1
+    assert not result.direct.listings
+
+
+def test_rejected_target_is_not_reported_as_returned_market_count() -> None:
+    scraper = SourceAndBroadScraper(
+        [synthetic_listing("target.test", "wrong-year", "Example Make", "Alpha", year=2020)],
+        [],
+    )
+    result = asyncio.run(
+        SearchService(scrapers=[scraper]).search(
+            SearchRequest(
+                brand="Example Make",
+                model="Alpha",
+                year=2022,
+                body_type="any",
+                region="any",
+                price=1_000_000,
+            )
+        )
+    )
+    assert not result.source_listings.listings
+    assert result.source_operations["broad"]["target"].count == 0
+    assert result.source_operations["broad"]["target"].state == SourceState.EMPTY
+
+
+def test_primary_sources_overlap_and_avito_starts_after_both_finish() -> None:
+    starts: list[str] = []
+    primary_started: set[str] = set()
+    release_primary = asyncio.Event()
+
+    class RecordingScraper(BaseScraper):
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            starts.append(self.source)
+            if self.source != "avito":
+                primary_started.add(self.source)
+                if primary_started == {"auto.ru", "drom.ru"}:
+                    release_primary.set()
+                await release_primary.wait()
+            else:
+                assert primary_started == {"auto.ru", "drom.ru"}
+            return []
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            return []
+
+    service = SearchService(
+        scrapers=[
+            RecordingScraper("avito"),
+            RecordingScraper("drom.ru"),
+            RecordingScraper("auto.ru"),
+        ]
+    )
+    result = asyncio.run(
+        service.search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert set(starts[:2]) == {"auto.ru", "drom.ru"}
+    assert starts[-1] == "avito"
+    assert list(result.source_status) == ["auto.ru", "drom.ru", "avito"]
+
+
+def test_failed_middle_source_does_not_prevent_later_source_or_discard_earlier_data() -> None:
+    starts: list[str] = []
+
+    class RecordingScraper(BaseScraper):
+        def __init__(self, source: str, fail: bool = False) -> None:
+            self.source = source
+            self.fail = fail
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            starts.append(self.source)
+            if self.fail:
+                raise SourceBlockedError("blocked in test")
+            return [listing(self.source, "1", 4_100_000)]
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            if self.fail:
+                raise SourceBlockedError("blocked in test")
+            return []
+
+    result = asyncio.run(
+        SearchService(
+            scrapers=[
+                RecordingScraper("avito"),
+                RecordingScraper("drom.ru", fail=True),
+                RecordingScraper("auto.ru"),
+            ]
+        ).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert starts == ["auto.ru", "drom.ru", "avito"]
+    assert result.source_status["drom.ru"] == SourceState.BLOCKED
+    assert result.source_status["auto.ru"] == SourceState.OK
+    assert result.source_status["avito"] == SourceState.OK
+    assert len(result.source_listings.listings) == 2
+
+
+def test_stalled_auto_does_not_cancel_concurrent_drom() -> None:
+    from backend.config import Settings
+
+    starts: list[str] = []
+
+    class RecordingScraper(BaseScraper):
+        def __init__(self, source: str) -> None:
+            self.source = source
+            self.settings = Settings(
+                _env_file=None,
+                source_search_timeout_seconds=0.09,
+                search_total_timeout_seconds=0.09,
+            )
+
+        async def search(self, query: SearchRequest) -> list[CarListing]:
+            starts.append(self.source)
+            if self.source == "auto.ru":
+                await asyncio.sleep(0.2)
+            return []
+
+        async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+            if self.source == "auto.ru":
+                await asyncio.sleep(0.2)
+            return []
+
+    result = asyncio.run(
+        SearchService(
+            scrapers=[
+                RecordingScraper("avito"),
+                RecordingScraper("drom.ru"),
+                RecordingScraper("auto.ru"),
+            ]
+        ).search(
+            SearchRequest(brand="Audi", model="A6", year=2022, body_type="sedan", price=4_100_000)
+        )
+    )
+    assert "drom.ru" in starts
+    assert result.source_status["auto.ru"] == SourceState.TIMEOUT
+    assert result.source_status["drom.ru"] == SourceState.EMPTY
+    assert result.source_status["avito"] == SourceState.TIMEOUT
 
 
 def test_source_timeout_keeps_completed_sources() -> None:
@@ -161,6 +421,9 @@ def test_source_timeout_preserves_completed_child() -> None:
     )
     assert result.source_status == {"partial-timeout": SourceState.PARTIAL}
     assert len(result.source_listings.listings) == 1
+    assert result.source_operations["partial-timeout"]["target"].count == 1
+    assert result.source_operations["partial-timeout"]["competitors"].state == SourceState.TIMEOUT
+    assert result.source_operations["partial-timeout"]["competitors"].error_type == "TimeoutError"
 
 
 def test_http_429_has_precise_source_status() -> None:
@@ -220,6 +483,40 @@ def test_catalog_failure_does_not_break_market_discovery() -> None:
         )
     )
     assert result.source_vehicle.segment is None
+    assert len(result.direct.listings) == 1
+
+
+def test_unknown_generation_does_not_reject_valid_target_listing(tmp_path) -> None:
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        '{"version":3,"sources":{},"brands":[{"id":"make","name":"Make",'
+        '"models":[{"id":"make:model","name":"Model","generations":['
+        '{"id":"make:model:g1","name":"G1","year_from":2020,"year_to":2024}]}]}]}',
+        encoding="utf-8",
+    )
+    cache = CatalogCache(path=path)
+    service = SearchService(scrapers=[], marketplace_catalog=cache)
+    query = SearchRequest(
+        brand="Make",
+        model="Model",
+        generation_id="make:model:g1",
+        year=2022,
+        body_type="sedan",
+        price=1_000_000,
+    )
+    candidate = CarListing(
+        source="test",
+        external_id="1",
+        brand="Make",
+        model="Model",
+        canonical_model_id="make:model",
+        year=2022,
+        body_type="sedan",
+        price=1_000_000,
+        url="https://example.test/1",
+        checked_at=datetime.now(UTC),
+    )
+    assert service._source_rejection_reason(candidate, query) is None
 
 
 def test_body_any_discovers_all_types_without_compatibility_filter() -> None:

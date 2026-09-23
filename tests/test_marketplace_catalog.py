@@ -10,7 +10,10 @@ from backend.services.marketplace_catalog import (
     SourceBrand,
     SourceCatalog,
     SourceModel,
+    _identity_keys,
+    _model_key,
 )
+from backend.tools.catalog_repair import split_source_collisions
 
 
 class FakeSource:
@@ -77,6 +80,109 @@ def test_drom_model_parser_excludes_navigation_and_deduplicates_cards() -> None:
     assert [(item.name, item.url) for item in models] == [
         ("X5", "https://www.drom.ru/catalog/bmw/x5/")
     ]
+
+
+def test_model_identity_preserves_meaningful_punctuation() -> None:
+    assert _model_key("X50") != _model_key("X50+")
+    assert _model_key("9-3") != _model_key("93")
+    assert _identity_keys("X50").isdisjoint(_identity_keys("X50+"))
+    assert _identity_keys("9-3").isdisjoint(_identity_keys("93"))
+
+
+def test_collision_repair_splits_distinct_source_paths_without_losing_enrichment() -> None:
+    def ref(slug: str) -> dict:
+        return {
+            "source": "drom.ru",
+            "url": f"https://www.drom.ru/catalog/make/{slug}/",
+            "path": f"/catalog/make/{slug}/",
+            "slug": slug,
+        }
+
+    payload = {
+        "brands": [
+            {
+                "id": "make",
+                "name": "Make",
+                "models": [
+                    {
+                        "id": "make:base",
+                        "name": "Base",
+                        "aliases": ["Base+"],
+                        "source_refs": [ref("base"), ref("base_plus")],
+                        "generations": [
+                            {
+                                "id": "known",
+                                "name": "Known",
+                                "source_refs": [
+                                    {
+                                        **ref("base"),
+                                        "path": "/catalog/make/base/g_2020_1/",
+                                        "url": "https://www.drom.ru/catalog/make/base/g_2020_1/",
+                                    }
+                                ],
+                            }
+                        ],
+                        "details_status": "complete",
+                        "details_parser_version": 3,
+                    }
+                ],
+            }
+        ]
+    }
+    repaired, changes = split_source_collisions(payload)
+    base, plus = repaired["brands"][0]["models"]
+    assert len(changes) == 1
+    assert base["id"] == "make:base"
+    assert len(base["generations"]) == 1
+    assert base["source_refs"] == [ref("base")]
+    assert plus["id"] == "make:baseplus"
+    assert plus["source_refs"] == [ref("base_plus")]
+    assert plus["details_status"] == "not_checked"
+    assert len(split_source_collisions(repaired)[1]) == 0
+    assert payload["brands"][0]["models"][0]["aliases"] == ["Base+"]
+
+
+def test_exact_display_name_wins_over_another_models_source_slug() -> None:
+    payload = {
+        "brands": [
+            {
+                "id": "make",
+                "name": "Make",
+                "models": [
+                    {
+                        "id": "make:alpha",
+                        "name": "Alpha",
+                        "source_refs": [
+                            {
+                                "source": "example",
+                                "url": "https://example.test/alpha_variant/",
+                                "path": "/alpha_variant/",
+                                "slug": "alpha_variant",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "make:alphabeta",
+                        "name": "Alpha Beta",
+                        "source_refs": [
+                            {
+                                "source": "example",
+                                "url": "https://example.test/alpha/",
+                                "path": "/alpha/",
+                                "slug": "alpha",
+                            },
+                        ],
+                    },
+                ],
+            }
+        ]
+    }
+
+    class StaticCache(CatalogCache):
+        def load(self):
+            return payload
+
+    assert StaticCache().model_entry("Make", "Alpha")["id"] == "make:alpha"
 
 
 def test_drom_generation_engine_and_power_parsing() -> None:
@@ -237,6 +343,86 @@ def test_sync_preserves_unavailable_source_refs_and_enrichment() -> None:
     assert one["generations"] == [{"id": "known", "name": "Known"}]
     assert cache.model_entry("Example", "Two") is not None
     cache_path.unlink()
+
+
+def test_sync_preserves_repaired_id_by_existing_source_url(tmp_path) -> None:
+    cache_path = tmp_path / "catalog.json"
+    model_url = "https://online.test/catalog/example/roadstar/"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "sources": {},
+                "brands": [
+                    {
+                        "id": "example",
+                        "name": "Example",
+                        "models": [
+                            {
+                                "id": "example:roadstar_repaired",
+                                "name": "Roadstar",
+                                "source_refs": [
+                                    {
+                                        "source": "online.test",
+                                        "url": model_url,
+                                        "path": "/catalog/example/roadstar/",
+                                        "slug": "roadstar",
+                                    }
+                                ],
+                                "generations": [{"id": "known", "name": "Known"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    asyncio.run(
+        CatalogSyncService(
+            [FakeSource("online.test", {"Example": ["Roadstar"]})],
+            CatalogCache(cache_path),
+        ).sync()
+    )
+    models = CatalogCache(cache_path).model_entries("Example")
+    assert len(models) == 1
+    assert models[0]["id"] == "example:roadstar_repaired"
+    assert models[0]["generations"] == [{"id": "known", "name": "Known"}]
+
+
+def test_auto_only_model_detail_read_does_not_rewrite_catalog(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "sources": {},
+                "brands": [{
+                    "id": "make",
+                    "name": "Make",
+                    "models": [{
+                        "id": "make:model",
+                        "name": "Model",
+                        "source_refs": [{
+                            "source": "auto.ru",
+                            "url": "https://auto.ru/catalog/cars/make/model/",
+                            "path": "/catalog/cars/make/model/",
+                            "slug": "model",
+                        }],
+                    }],
+                }],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache = CatalogCache(path=path)
+
+    async def unexpected_write(*args, **kwargs):
+        raise AssertionError("read endpoint must not rewrite an Auto.ru-only model")
+
+    monkeypatch.setattr(CatalogCache, "merge_model_observation", unexpected_write)
+    state = asyncio.run(CatalogEnrichmentService(cache).ensure_window("Make", "Model", 2022, 2022))
+    assert state == "source_not_supported_for_details"
 
 
 def test_identity_resolution_is_exact_and_collision_safe() -> None:

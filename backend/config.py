@@ -22,12 +22,16 @@ class Settings(BaseSettings):
     cheaper_max_percent: float = Field(default=0.20, gt=0, lt=1)
     auto_ru_base_url: str = "https://auto.ru"
     scraper_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    avito_browser_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    auto_ru_discovery_collection_seconds: float = Field(default=8.0, gt=0, le=30)
+    auto_ru_discovery_detail_seconds: float = Field(default=5.0, gt=0, le=30)
     target_operation_timeout_seconds: float = Field(default=30.0, gt=0, le=180)
     discovery_operation_timeout_seconds: float = Field(default=40.0, gt=0, le=180)
     source_search_timeout_seconds: float = Field(default=42.0, gt=0, le=180)
     search_total_timeout_seconds: float = Field(default=50.0, gt=0, le=240)
     scraper_detail_concurrency: int = Field(default=4, ge=1, le=10)
     scraper_max_pages: int = Field(default=10, ge=1, le=50)
+    live_search_max_pages: int = Field(default=2, ge=1, le=5)
     scraper_max_listings: int = Field(default=500, ge=1, le=5000)
     car_knowledge_ttl_days: int = Field(default=90, ge=1, le=3650)
     yandex_api_key: str | None = None

@@ -46,7 +46,7 @@ from backend.services.competitor_engine import CompetitorEngine
 from backend.services.deduplication import deduplicate_listings
 from backend.services.grouping import group_by_model
 from backend.services.knowledge import CarKnowledgeService
-from backend.services.marketplace_catalog import CatalogCache
+from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.regions import location_matches, region_entry, region_value
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,11 @@ class SourceOperationResult(BaseModel):
     count: int = Field(ge=0)
     detail: str
     elapsed_seconds: float = Field(ge=0)
+    requests: int = Field(default=0, ge=0)
+    elapsed_ms: int = Field(default=0, ge=0)
+    error_type: str | None = None
+    error_message: str | None = None
+    browser_fallback_used: bool = False
 
 
 class InvalidSearchSelection(ValueError):
@@ -114,16 +119,22 @@ class SearchService:
         catalog: VehicleCatalog | None = None,
         engine: CompetitorEngine | None = None,
         knowledge: CarKnowledgeService | None = None,
+        marketplace_catalog: CatalogCache | None = None,
     ) -> None:
+        shared_catalog = marketplace_catalog or get_catalog_cache()
         self.scrapers = (
             list(scrapers)
             if scrapers is not None
-            else [AutoRuScraper(), AvitoScraper(), DromScraper()]
+            else [
+                AutoRuScraper(catalog=shared_catalog),
+                DromScraper(catalog=shared_catalog),
+                AvitoScraper(),
+            ]
         )
-        self.catalog = catalog or VehicleCatalog()
+        self.catalog = catalog or VehicleCatalog(shared_catalog)
         self.engine = engine or CompetitorEngine()
         self.knowledge = knowledge or CarKnowledgeService()
-        self.marketplace_catalog = CatalogCache()
+        self.marketplace_catalog = shared_catalog
 
     async def search(self, request: SearchRequest) -> SearchResult:
         if region_entry(request.region) is None:
@@ -218,39 +229,58 @@ class SearchService:
             ),
         )
 
-        tasks = [
-            asyncio.create_task(self._search_marketplace(scraper, discovery, normalized))
-            for scraper in self.scrapers
-        ]
-        if tasks:
-            done, pending = await asyncio.wait(
-                tasks, timeout=self._settings().search_total_timeout_seconds
-            )
-        else:
-            done, pending = set(), set()
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        outcomes: list[MarketplaceOutcome] = []
-        for task in tasks:
-            if task not in done:
-                outcomes.append(MarketplaceOutcome(TimeoutError(), TimeoutError()))
-                continue
+        # Auto.ru and Drom are independent primary sources and overlap. Avito is
+        # deliberately a second phase because its browser fallback is lower value.
+        priority = {"auto.ru": 0, "drom.ru": 1, "avito": 2}
+        ordered_scrapers = sorted(
+            self.scrapers, key=lambda scraper: priority.get(scraper.source, 3)
+        )
+        deadline = time.monotonic() + self._settings().search_total_timeout_seconds
+        outcome_by_source: dict[int, MarketplaceOutcome] = {}
+
+        async def run_source(scraper: BaseScraper, budget: float) -> MarketplaceOutcome:
             try:
-                outcomes.append(task.result())
-            except BaseException as exc:
-                outcomes.append(MarketplaceOutcome(exc, exc))
+                return await self._search_marketplace(
+                    scraper, discovery, normalized, timeout_seconds=budget
+                )
+            except Exception as exc:
+                return MarketplaceOutcome(exc, exc)
+
+        primary = [scraper for scraper in ordered_scrapers if scraper.source != "avito"]
+        primary_results = await asyncio.gather(
+            *(
+                run_source(scraper, self._settings().source_search_timeout_seconds)
+                for scraper in primary
+            )
+        )
+        outcome_by_source.update(
+            (id(scraper), outcome)
+            for scraper, outcome in zip(primary, primary_results, strict=True)
+        )
+        for scraper in ordered_scrapers:
+            if scraper.source != "avito":
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            outcome_by_source[id(scraper)] = (
+                await run_source(
+                    scraper,
+                    min(self._settings().source_search_timeout_seconds, remaining),
+                )
+                if remaining > 0
+                else MarketplaceOutcome(TimeoutError(), TimeoutError())
+            )
+        outcomes = [outcome_by_source[id(scraper)] for scraper in ordered_scrapers]
         statuses: dict[str, SourceState] = {}
         details: dict[str, str] = {}
         warnings: list[str] = []
         discovered: list[CarListing] = []
         target_listings: list[CarListing] = []
+        target_owners: dict[int, str] = {}
         source_distribution: dict[str, int] = {}
         diagnostics: dict[str, SourceDiagnostics] = {}
         operation_diagnostics: dict[str, dict[str, SourceDiagnostics]] = {}
         source_operations: dict[str, dict[str, SourceOperationResult]] = {}
-        for scraper, outcome in zip(self.scrapers, outcomes, strict=True):
+        for scraper, outcome in zip(ordered_scrapers, outcomes, strict=True):
             scraper_operation_diagnostics = {
                 name: value.model_copy(deep=True)
                 for name, value in getattr(scraper, "diagnostics", {}).items()
@@ -302,6 +332,9 @@ class SearchService:
                 discovered.extend(outcome.discovered)
             if isinstance(outcome.source_listings, list):
                 target_listings.extend(outcome.source_listings)
+                target_owners.update(
+                    (id(listing), scraper.source) for listing in outcome.source_listings
+                )
                 source_distribution[scraper.source] = len(outcome.source_listings)
             else:
                 source_distribution[scraper.source] = 0
@@ -338,9 +371,20 @@ class SearchService:
                 source_diagnostic.rejected["duplicate"] = (
                     source_diagnostic.rejected.get("duplicate", 0) + count
                 )
-        source_distribution = {scraper.source: 0 for scraper in self.scrapers}
+        source_distribution = {scraper.source: 0 for scraper in ordered_scrapers}
+        accepted_target_counts = {scraper.source: 0 for scraper in ordered_scrapers}
         for item in source_unique:
             source_distribution[item.source] = source_distribution.get(item.source, 0) + 1
+            owner = target_owners.get(id(item), item.source)
+            accepted_target_counts[owner] = accepted_target_counts.get(owner, 0) + 1
+        for source_name, operations in source_operations.items():
+            target_operation = operations["target"]
+            raw_count = target_operation.count
+            accepted_count = accepted_target_counts.get(source_name, 0)
+            target_operation.count = accepted_count
+            if raw_count and not accepted_count and target_operation.state == SourceState.OK:
+                target_operation.state = SourceState.EMPTY
+                target_operation.detail = "Подходящих объявлений после фильтров нет"
         source_items = [
             self._classified_item(source.reference_price, listing) for listing in source_unique
         ]
@@ -469,6 +513,8 @@ class SearchService:
         scraper: BaseScraper,
         discovery: MarketDiscoveryRequest,
         source_query: SearchRequest,
+        *,
+        timeout_seconds: float | None = None,
     ) -> MarketplaceOutcome:
         async def measured(operation: str, coroutine):
             operation_started = time.perf_counter()
@@ -478,7 +524,11 @@ class SearchService:
                     if operation == "target"
                     else self._settings().discovery_operation_timeout_seconds
                 )
-                budget = min(budget, self._settings().source_search_timeout_seconds)
+                budget = min(
+                    budget,
+                    self._settings().source_search_timeout_seconds,
+                    timeout_seconds if timeout_seconds is not None else float("inf"),
+                )
                 return await asyncio.wait_for(coroutine, timeout=budget)
             finally:
                 diagnostic = getattr(scraper, "diagnostics", {}).get(operation)
@@ -492,7 +542,11 @@ class SearchService:
             "discovered": asyncio.create_task(measured("competitors", scraper.discover(discovery))),
         }
         done, pending = await asyncio.wait(
-            tasks.values(), timeout=self._settings().source_search_timeout_seconds
+            tasks.values(),
+            timeout=min(
+                self._settings().source_search_timeout_seconds,
+                timeout_seconds if timeout_seconds is not None else float("inf"),
+            ),
         )
         for task in pending:
             task.cancel()
@@ -517,6 +571,12 @@ class SearchService:
         diagnostic: SourceDiagnostics | None,
     ) -> SourceOperationResult:
         elapsed = diagnostic.elapsed_seconds if diagnostic is not None else 0
+        observation = {
+            "elapsed_seconds": elapsed,
+            "elapsed_ms": round(elapsed * 1000),
+            "requests": diagnostic.http_requests if diagnostic is not None else 0,
+            "browser_fallback_used": bool(diagnostic and diagnostic.browser_fallbacks),
+        }
         if isinstance(value, list):
             state = SourceState.OK if value else SourceState.EMPTY
             if diagnostic is not None and diagnostic.degraded:
@@ -532,14 +592,22 @@ class SearchService:
                 state=state,
                 count=len(value),
                 detail=detail,
-                elapsed_seconds=elapsed,
+                error_type="PartialRouteFailure"
+                if diagnostic and diagnostic.partial_failures
+                else None,
+                error_message="; ".join(diagnostic.notes)
+                if diagnostic and diagnostic.partial_failures
+                else None,
+                **observation,
             )
         state = self._state_for_error(value)
         return SourceOperationResult(
             state=state,
             count=0,
             detail=self._message_for_state(state),
-            elapsed_seconds=elapsed,
+            error_type=type(value).__name__,
+            error_message=str(value),
+            **observation,
         )
 
     def _settings(self) -> Settings:
@@ -572,19 +640,15 @@ class SearchService:
             ) is True and listing.raw_metadata.get("region_scope") == region_value(query.region)
             if not guaranteed:
                 return "region"
-        if query.generation_id and listing.canonical_generation_id != query.generation_id:
-            candidate_generations = self.marketplace_catalog.generations(
-                query.brand, query.model, listing.year
-            )
+        if query.generation_id:
             guaranteed = (
                 listing.raw_metadata.get("generation_filter_guaranteed") is True
-                and listing.raw_metadata.get("generation_id") == query.generation_id
+                and listing.raw_metadata.get("generation_id") is not None
             )
-            year_unambiguous = (
-                len(candidate_generations) == 1
-                and candidate_generations[0]["id"] == query.generation_id
+            identified = listing.canonical_generation_id or (
+                str(listing.raw_metadata["generation_id"]) if guaranteed else None
             )
-            if not guaranteed and not year_unambiguous:
+            if identified is not None and identified != query.generation_id:
                 return "generation"
         if query.modification_id and not self._engine_matches_listing(listing, query):
             return "engine"

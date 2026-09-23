@@ -4,7 +4,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.models.car import SearchRequest
-from backend.services.marketplace_catalog import CatalogCache, CatalogEnrichmentService
+from backend.services.marketplace_catalog import (
+    CatalogCache,
+    CatalogEnrichmentService,
+    get_catalog_cache,
+)
 from backend.services.reference_data import regions_catalog, vehicle_catalog
 from backend.services.search_service import InvalidSearchSelection, SearchResult, SearchService
 
@@ -13,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_search_service() -> SearchService:
-    return SearchService()
+    return SearchService(marketplace_catalog=get_catalog_cache())
 
 
 @router.post("/search", response_model=SearchResult)
@@ -34,12 +38,12 @@ async def catalog_vehicles() -> dict[str, object]:
 
 @router.get("/catalog/brands")
 async def catalog_brands() -> list[str]:
-    return CatalogCache().brands()
+    return get_catalog_cache().brands()
 
 
 @router.get("/catalog/models")
 async def catalog_models(brand: str) -> list[str]:
-    return CatalogCache().models(brand)
+    return get_catalog_cache().models(brand)
 
 
 def _year_window(year: int | None, year_from: int | None, year_to: int | None) -> tuple[int, int]:
@@ -89,7 +93,7 @@ async def catalog_generations(
     year_from: int | None = None,
     year_to: int | None = None,
 ) -> list[dict[str, object]]:
-    cache = CatalogCache()
+    cache = get_catalog_cache()
     start, end = _year_window(year, year_from, year_to)
     await _enrich_window(cache, brand, model, start, end)
     return _generation_options(cache, brand, model, start, end)
@@ -103,7 +107,7 @@ async def catalog_generation_state(
     year_from: int | None = None,
     year_to: int | None = None,
 ) -> dict[str, object]:
-    cache = CatalogCache()
+    cache = get_catalog_cache()
     start, end = _year_window(year, year_from, year_to)
     state = await _enrich_window(cache, brand, model, start, end)
     options = _generation_options(cache, brand, model, start, end)
@@ -122,7 +126,7 @@ async def catalog_engines(
     year_to: int | None = None,
     generation_id: str | None = None,
 ) -> list[dict[str, object]]:
-    cache = CatalogCache()
+    cache = get_catalog_cache()
     start, end = _year_window(year, year_from, year_to)
     await _enrich_window(cache, brand, model, start, end)
     return cache.engine_options(
@@ -136,7 +140,7 @@ async def catalog_engines(
 
 @router.get("/catalog/status")
 async def catalog_status() -> dict[str, object]:
-    return CatalogCache().status()
+    return get_catalog_cache().status()
 
 
 @router.get("/catalog/regions")

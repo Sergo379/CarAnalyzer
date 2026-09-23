@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import time
 from datetime import UTC, datetime
 
@@ -27,7 +28,12 @@ from backend.tools.catalog_audit import audit_catalog
 
 
 class PacedClient(httpx.AsyncClient):
-    def __init__(self, pace_seconds: float) -> None:
+    def __init__(
+        self,
+        pace_seconds: float,
+        pace_min_seconds: float | None = None,
+        pace_max_seconds: float | None = None,
+    ) -> None:
         super().__init__(
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True,
@@ -35,17 +41,32 @@ class PacedClient(httpx.AsyncClient):
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
         )
         self.pace_seconds = pace_seconds
+        self.pace_min_seconds = pace_min_seconds
+        self.pace_max_seconds = pace_max_seconds
         self.last_request = 0.0
         self.request_count = 0
         self._pace_lock = asyncio.Lock()
 
+    def _next_interval(self) -> float:
+        if self.pace_min_seconds is not None and self.pace_max_seconds is not None:
+            return random.uniform(
+                self.pace_min_seconds,
+                self.pace_max_seconds,
+            )
+
+        return self.pace_seconds
+
     async def get(self, url: str, **kwargs) -> httpx.Response:  # type: ignore[override]
         async with self._pace_lock:
-            delay = self.pace_seconds - (time.monotonic() - self.last_request)
+            interval = self._next_interval()
+
+            delay = interval - (time.monotonic() - self.last_request)
             if delay > 0:
                 await asyncio.sleep(delay)
+
             self.last_request = time.monotonic()
             self.request_count += 1
+
             return await super().get(url, **kwargs)
 
 
@@ -74,7 +95,11 @@ async def enrich_all(
     *,
     retry_failed: bool = False,
     pace_seconds: float = 1.5,
+    pace_min_seconds: float | None = None,
+    pace_max_seconds: float | None = None,
     max_models: int | None = None,
+    source: str | None = None,
+    statuses: frozenset[str] | None = None,
 ) -> dict:
     service = CatalogEnrichmentService(cache)
     model_ids = [
@@ -85,9 +110,21 @@ async def enrich_all(
     outcomes: dict[str, int] = {}
     processed = 0
     consecutive_unavailable = 0
-    async with PacedClient(pace_seconds) as client:
+    async with PacedClient(
+        pace_seconds,
+        pace_min_seconds,
+        pace_max_seconds,
+    ) as client:
         for brand, model in model_ids:
             entry = cache.model_entry(brand, model)
+            if entry is not None and source is not None and not any(
+                ref.get("source") == source for ref in entry.get("source_refs", [])
+            ):
+                continue
+            if entry is not None and statuses is not None and str(
+                entry.get("details_status", "not_checked")
+            ) not in statuses:
+                continue
             if entry is None or not _eligible(entry, retry_failed):
                 continue
             if max_models is not None and processed >= max_models:
@@ -150,31 +187,65 @@ def promote() -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+
     parser.add_argument(
-        "--resume", action="store_true", help="Resume from model status checkpoints (default)"
+        "--resume",
+        action="store_true",
+        help="Resume from model status checkpoints (default)",
     )
+
     parser.add_argument(
-        "--retry-failed", action="store_true", help="Retry negative statuses before their TTL"
+        "--retry-failed",
+        action="store_true",
+        help="Retry negative statuses before their TTL",
     )
+
     parser.add_argument("--pace-seconds", type=float, default=1.5)
+    parser.add_argument("--pace-min-seconds", type=float)
+    parser.add_argument("--pace-max-seconds", type=float)
+
     parser.add_argument("--max-models", type=int)
+    parser.add_argument("--source", help="Only models mapped to this catalog source")
+    parser.add_argument("--status", action="append", help="Only these details statuses")
+
     parser.add_argument(
-        "--promote", action="store_true", help="Manually validate and promote runtime to seed"
+        "--promote",
+        action="store_true",
+        help="Manually validate and promote runtime to seed",
     )
+
     args = parser.parse_args()
+
     if args.promote:
         report = promote()
+
     else:
         if args.pace_seconds < 0.5:
             parser.error("--pace-seconds must be at least 0.5")
+
+        if (args.pace_min_seconds is None) != (args.pace_max_seconds is None):
+            parser.error("--pace-min-seconds and --pace-max-seconds must be used together")
+
+        if args.pace_min_seconds is not None and args.pace_max_seconds is not None:
+            if args.pace_min_seconds < 0.5:
+                parser.error("--pace-min-seconds must be at least 0.5")
+
+            if args.pace_max_seconds < args.pace_min_seconds:
+                parser.error("--pace-max-seconds must be >= --pace-min-seconds")
+
         report = asyncio.run(
             enrich_all(
                 CatalogCache(),
                 retry_failed=args.retry_failed,
                 pace_seconds=args.pace_seconds,
+                pace_min_seconds=args.pace_min_seconds,
+                pace_max_seconds=args.pace_max_seconds,
                 max_models=args.max_models,
+                source=args.source,
+                statuses=frozenset(args.status) if args.status else None,
             )
         )
+
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

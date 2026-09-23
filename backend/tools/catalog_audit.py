@@ -47,15 +47,27 @@ def _valid_ref(ref: dict) -> bool:
     )
 
 
-def audit_catalog(cache: CatalogCache | None = None) -> dict:
+def audit_catalog(
+    cache: CatalogCache | None = None,
+    source_model_counts: dict[str, dict[str, int]] | None = None,
+) -> dict:
+    """Audit stored models; optional index counts use canonical brand IDs.
+
+    Index counts must come from an independent source-model snapshot. Without
+    them, completeness is unknown rather than inferred from generation coverage.
+    """
     payload = (cache or CatalogCache()).load()
     records: list[dict] = []
     errors: list[dict] = []
     per_brand: list[dict] = []
     brand_ids: set[str] = set()
     model_ids: set[str] = set()
+    source_ref_owners: dict[tuple[str, str], str] = {}
     engine_keys: set[str] = set()
     counts: Counter[str] = Counter()
+    index_counts = source_model_counts or {}
+    compared_brands: set[str] = set()
+    gap_brands: set[str] = set()
 
     for brand in payload.get("brands", []):
         brand_id = str(brand.get("id", ""))
@@ -83,6 +95,18 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
             for ref in refs:
                 if not _valid_ref(ref):
                     errors.append({"id": model_id, "type": "invalid_source_ref", "ref": ref})
+                source_key = (str(ref.get("source", "")), str(ref.get("url", "")))
+                owner = source_ref_owners.setdefault(source_key, model_id)
+                if owner != model_id:
+                    errors.append(
+                        {
+                            "id": model_id,
+                            "type": "source_id_collision",
+                            "source": source_key[0],
+                            "url": source_key[1],
+                            "other": owner,
+                        }
+                    )
 
             name = str(model.get("name", ""))
             if name.casefold() in PSEUDO_NAMES or not name.strip():
@@ -202,12 +226,57 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
             counts[status] += 1
             brand_counts[status] += 1
 
+        completeness: dict[str, dict[str, int | float]] = {}
+        for source, brand_index in index_counts.items():
+            if brand_id not in brand_index:
+                continue
+            expected = brand_index[brand_id]
+            if not isinstance(expected, int) or expected < 0:
+                raise ValueError("Source model counts must be non-negative integers")
+            stored_models = sum(
+                any(ref.get("source") == source for ref in model.get("source_refs", []))
+                for model in brand.get("models", [])
+            )
+            stored_refs = len(
+                {
+                    str(ref.get("url"))
+                    for model in brand.get("models", [])
+                    for ref in model.get("source_refs", [])
+                    if ref.get("source") == source
+                }
+            )
+            missing = max(0, expected - stored_refs)
+            collapsed = max(0, stored_refs - stored_models)
+            completeness[source] = {
+                "source_model_count": expected,
+                "stored_model_count": stored_models,
+                "stored_source_ref_count": stored_refs,
+                "missing_model_count": missing,
+                "canonical_alias_collapses": collapsed,
+                "coverage_pct": round(100 * stored_refs / expected, 2) if expected else 100,
+            }
+            counts["source_index_comparisons"] += 1
+            counts["source_index_missing_mappings"] += missing
+            counts["source_index_canonical_alias_collapses"] += collapsed
+            compared_brands.add(brand_id)
+            if missing:
+                gap_brands.add(brand_id)
+                errors.append(
+                    {
+                        "id": brand_id,
+                        "type": "source_model_count_gap",
+                        "source": source,
+                        **completeness[source],
+                    }
+                )
+
         total = brand_counts["models"]
         per_brand.append(
             {
                 "id": brand_id,
                 "name": brand.get("name"),
                 **dict(brand_counts),
+                "source_model_completeness": completeness,
                 "pending": brand_counts["not_checked"] + brand_counts["needs_reparse"],
                 "generation_coverage_pct": round(
                     100 * brand_counts["models_with_generations"] / total, 2
@@ -220,6 +289,28 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
             }
         )
 
+    for source, brand_index in index_counts.items():
+        for brand_id, expected in brand_index.items():
+            if brand_id in brand_ids:
+                continue
+            if not isinstance(expected, int) or expected < 0:
+                raise ValueError("Source model counts must be non-negative integers")
+            compared_brands.add(brand_id)
+            counts["source_index_comparisons"] += 1
+            counts["source_index_missing_mappings"] += expected
+            if expected:
+                gap_brands.add(brand_id)
+                errors.append(
+                    {
+                        "id": brand_id,
+                        "type": "source_brand_missing",
+                        "source": source,
+                        "source_model_count": expected,
+                        "stored_model_count": 0,
+                        "missing_model_count": expected,
+                    }
+                )
+
     total = counts["models"]
     summary = {
         "total_brands": len(payload.get("brands", [])),
@@ -230,6 +321,12 @@ def audit_catalog(cache: CatalogCache | None = None) -> dict:
         "models_without_source_refs": total - counts["models_with_source_refs"],
         "models_without_generations": total - counts["models_with_generations"],
         "unique_engines": len(engine_keys),
+        "source_index_available": bool(index_counts),
+        "source_index_comparisons": counts["source_index_comparisons"],
+        "source_index_brands_compared": len(compared_brands),
+        "source_index_brands_with_gaps": len(gap_brands),
+        "source_index_missing_mappings": counts["source_index_missing_mappings"],
+        "source_index_canonical_alias_collapses": counts["source_index_canonical_alias_collapses"],
         "generation_coverage_pct": round(100 * counts["models_with_generations"] / total, 2)
         if total
         else 0,
@@ -251,10 +348,21 @@ def main() -> None:
     )
     parser.add_argument("--json", action="store_true", help="Print full machine-readable report")
     parser.add_argument(
+        "--source-counts",
+        type=Path,
+        help='Optional independent index counts JSON: {"source": {"canonical_brand_id": count}}',
+    )
+    parser.add_argument(
         "--output", type=Path, help="Write full audit records and per-brand coverage"
     )
     args = parser.parse_args()
-    report = audit_catalog(CatalogCache(path=args.path) if args.path else None)
+    source_counts = (
+        json.loads(args.source_counts.read_text(encoding="utf-8")) if args.source_counts else None
+    )
+    report = audit_catalog(
+        CatalogCache(path=args.path) if args.path else None,
+        source_model_counts=source_counts,
+    )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
