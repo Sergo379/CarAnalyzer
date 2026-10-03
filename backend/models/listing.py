@@ -41,6 +41,8 @@ class CarListing(BaseModel):
     region: str | None = Field(default=None, max_length=160)
     checked_at: datetime
     segment: str | None = Field(default=None, max_length=80)
+    segment_code: str = "UNKNOWN"
+    market_position: str = "unknown"
     raw_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -64,6 +64,8 @@ class Car(BaseModel):
     region: str = SearchRegion.ANY.value
     price: int = Field(gt=0)
     segment: str | None = Field(default=None, max_length=80)
+    segment_code: str = "UNKNOWN"
+    market_position: str = "unknown"
 
     @field_validator("brand", "model")
     @classmethod
@@ -166,6 +168,12 @@ class SearchRequest(BaseModel):
 
 class SourceVehicle(SearchRequest):
     segment: str | None = Field(default=None, max_length=80)
+    segment_code: str = "UNKNOWN"
+    segment_family: str = "unknown"
+    segment_size: str | None = None
+    market_position: str = "unknown"
+    segment_method: str = "unknown"
+    segment_confidence: str = "low"
     generation: str | None = Field(default=None, max_length=160)
     canonical_brand_id: str
     canonical_model_id: str

@@ -1,0 +1,46 @@
+{
+  "version": 3,
+  "sources": {
+    "online.test": {
+      "status": "ok",
+      "detail": "fixture"
+    }
+  },
+  "brands": [
+    {
+      "id": "example",
+      "name": "Example",
+      "models": [
+        {
+          "id": "example:roadstar_repaired",
+          "name": "Roadstar",
+          "source_refs": [
+            {
+              "source": "online.test",
+              "url": "https://online.test/catalog/example/roadstar/",
+              "path": "/catalog/example/roadstar/",
+              "slug": "roadstar"
+            }
+          ],
+          "generations": [
+            {
+              "id": "known",
+              "name": "Known"
+            }
+          ],
+          "aliases": []
+        }
+      ],
+      "aliases": [],
+      "source_refs": [
+        {
+          "source": "online.test",
+          "url": "https://online.test/catalog/example/",
+          "path": "/catalog/example/",
+          "slug": "example"
+        }
+      ]
+    }
+  ],
+  "catalog_updated_at": "2026-09-26T20:18:15.473699+00:00"
+}

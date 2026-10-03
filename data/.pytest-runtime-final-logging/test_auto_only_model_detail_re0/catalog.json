@@ -1,0 +1,1 @@
+{"version": 3, "sources": {}, "brands": [{"id": "make", "name": "Make", "models": [{"id": "make:model", "name": "Model", "source_refs": [{"source": "auto.ru", "url": "https://auto.ru/catalog/cars/make/model/", "path": "/catalog/cars/make/model/", "slug": "model"}]}]}]}

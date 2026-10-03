@@ -2,6 +2,8 @@ import sqlite3
 from pathlib import Path
 
 from backend.database.db import connect
+from backend.database.knowledge_schema import initialize_knowledge_schema
+from backend.services.segment_classifier import SEGMENT_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS listings (
@@ -100,6 +102,8 @@ def initialize_connection(connection: sqlite3.Connection) -> None:
         for name, definition in columns.items():
             if name not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    initialize_knowledge_schema(connection)
+    connection.executescript(SEGMENT_SCHEMA)
     connection.commit()
 
 

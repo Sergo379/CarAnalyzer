@@ -61,5 +61,12 @@ td strong, td span { display: block; }
 .negative { color: #14705a; font-weight: 800; }
 .empty { padding: 28px; text-align: center; color: #788596; background: #f8fafc; border-radius: 14px; }
 .knowledge { display: block; background: linear-gradient(135deg, #123841, #101827); }
+.knowledge-group { margin-top: 18px; padding: 15px 17px; border: 1px solid #ffffff25; border-radius: 14px; background: #ffffff0b; }
+.knowledge-group h3 { margin: 0 0 8px; font-size: 16px; }
+.knowledge-group ul, .knowledge details ul { display: grid; gap: 10px; margin: 0; padding-left: 20px; }
+.knowledge-group li span, .knowledge-group li small { display: block; margin-top: 3px; color: #b9c4d3; }
+.knowledge details { margin-top: 16px; }
+.knowledge summary { cursor: pointer; font-weight: 800; }
+.knowledge a { color: #9de8e6; }
 @media (max-width: 1100px) { .search-card { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 680px) { main { width: min(100% - 20px, 1500px); padding-top: 20px; } .hero { align-items: flex-start; } .search-card { grid-template-columns: 1fr; } .summary { display: block; } .statuses { justify-content: flex-start; margin-top: 15px; } .result-section { padding: 16px; } }

@@ -12,6 +12,20 @@ dependencies = [
     "python-dotenv>=1.2.3",
 ]
 
+[project.optional-dependencies]
+knowledge = [
+    "ddgs>=9.15.0",
+    "google-genai>=2.25.0",
+    "llama-index-core>=0.14.0",
+    "pypdf>=6.0.0",
+    "sentence-transformers>=5.0.0",
+    "sqlite-vec>=0.1.6",
+]
+lab = [
+    "langfuse>=3.0.0",
+    "mlflow>=3.0.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

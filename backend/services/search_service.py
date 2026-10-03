@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -9,6 +10,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from backend.config import Settings, get_settings
+from backend.knowledge.gemini import GeminiProvider
 from backend.models.car import (
     BodyFilter,
     BodyType,
@@ -48,6 +50,7 @@ from backend.services.grouping import group_by_model
 from backend.services.knowledge import CarKnowledgeService
 from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.regions import location_matches, region_entry, region_value
+from backend.services.segment_classifier import SegmentClassification, SegmentClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,7 @@ class SearchResult(BaseModel):
         default_factory=dict
     )
     source_operations: dict[str, dict[str, "SourceOperationResult"]] = Field(default_factory=dict)
-    pipeline_diagnostics: dict[str, int] = Field(default_factory=dict)
+    pipeline_diagnostics: dict[str, int | str | bool | dict[str, int]] = Field(default_factory=dict)
     direct: CategoryResult
     expensive: CategoryResult
     cheaper: CategoryResult
@@ -120,6 +123,7 @@ class SearchService:
         engine: CompetitorEngine | None = None,
         knowledge: CarKnowledgeService | None = None,
         marketplace_catalog: CatalogCache | None = None,
+        segment_classifier: SegmentClassifier | None = None,
     ) -> None:
         shared_catalog = marketplace_catalog or get_catalog_cache()
         self.scrapers = (
@@ -135,6 +139,15 @@ class SearchService:
         self.engine = engine or CompetitorEngine()
         self.knowledge = knowledge or CarKnowledgeService()
         self.marketplace_catalog = shared_catalog
+        provider = GeminiProvider()
+        self.segment_classifier = segment_classifier or (
+            SegmentClassifier(
+                shared_catalog,
+                ai_fallback=provider.classify_segment if provider.configured else None,
+            )
+            if isinstance(self.catalog, VehicleCatalog)
+            else None
+        )
 
     async def search(self, request: SearchRequest) -> SearchResult:
         if region_entry(request.region) is None:
@@ -204,10 +217,24 @@ class SearchService:
             normalized.reference_year,
             concrete_body,
         )
+        source_class = await self._normalized_segment(
+            normalized.brand,
+            normalized.model,
+            normalized.generation_id,
+            concrete_body,
+            allow_ai=True,
+            allow_source_fetch=True,
+        )
         generation = str(selected_generation["name"]) if selected_generation else None
         source = SourceVehicle(
             **normalized.model_dump(),
             segment=source_segment,
+            segment_code=source_class.segment_code,
+            segment_family=source_class.segment_family,
+            segment_size=source_class.segment_size,
+            market_position=source_class.market_position,
+            segment_method=source_class.segment_method,
+            segment_confidence=source_class.segment_confidence,
             generation=generation,
             canonical_brand_id=identity.canonical_brand_id,
             canonical_model_id=identity.canonical_model_id,
@@ -425,18 +452,84 @@ class SearchService:
                 BodyType(normalized.body_type.value), listing.body_type
             )
         ]
-        for listing in after_body:
-            listing.segment = self._classify_segment(
-                listing.brand,
-                listing.model,
-                listing.year,
-                listing.body_type,
+        segment_by_scope: dict[tuple[str, str], SegmentClassification] = {}
+        direct_bounds = self.engine.calculate_price_ranges(source.reference_price)
+        prefetch_scopes: dict[tuple[str, str], CarListing] = {}
+        for listing in sorted(
+            after_body, key=lambda item: abs(item.price - source.reference_price)
+        ):
+            if not (
+                listing.canonical_generation_id
+                and direct_bounds.direct_min <= listing.price <= direct_bounds.direct_max
+            ):
+                continue
+            key = (
+                listing.canonical_model_id or f"{listing.brand}|{listing.model}",
+                listing.canonical_generation_id,
             )
+            prefetch_scopes.setdefault(key, listing)
+            if len(prefetch_scopes) == 6:
+                break
+        semaphore = asyncio.Semaphore(4)
+
+        async def enrich_segment(
+            scope: tuple[str, str], listing: CarListing
+        ) -> tuple[tuple[str, str], SegmentClassification]:
+            async with semaphore:
+                return scope, await self._normalized_segment(
+                    listing.brand,
+                    listing.model,
+                    listing.canonical_generation_id,
+                    listing.body_type,
+                    allow_source_fetch=True,
+                )
+
+        if prefetch_scopes:
+            tasks = [
+                asyncio.create_task(enrich_segment(scope, listing))
+                for scope, listing in prefetch_scopes.items()
+            ]
+            done, pending = await asyncio.wait(tasks, timeout=5.0)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                if not task.cancelled() and task.exception() is None:
+                    scope, classification = task.result()
+                    segment_by_scope[scope] = classification
+        family_by_scope: dict[tuple[str, str, BodyType | None], str | None] = {}
+        for listing in after_body:
+            scope = (
+                listing.canonical_model_id or f"{listing.brand}|{listing.model}",
+                listing.canonical_generation_id or "",
+            )
+            family_scope = (*scope, listing.body_type)
+            if family_scope not in family_by_scope:
+                family_by_scope[family_scope] = self._classify_segment(
+                    listing.brand, listing.model, listing.year, listing.body_type
+                )
+            listing.segment = family_by_scope[family_scope]
+            if scope not in segment_by_scope:
+                segment_by_scope[scope] = await self._normalized_segment(
+                    listing.brand, listing.model, listing.canonical_generation_id, listing.body_type
+                )
+            classification = segment_by_scope[scope]
+            listing.segment_code = classification.segment_code
+            listing.market_position = classification.market_position
         after_segment = [
             listing
             for listing in after_body
             if self.engine.segment_is_compatible(source.segment, listing.segment)
+            and self.engine.normalized_segment_compatible(source.segment_code, listing.segment_code)
         ]
+        incompatible_segments = sum(
+            self.engine.segment_is_compatible(source.segment, listing.segment)
+            and not self.engine.normalized_segment_compatible(
+                source.segment_code, listing.segment_code
+            )
+            for listing in after_body
+        )
         after_price = [
             listing
             for listing in after_segment
@@ -451,6 +544,25 @@ class SearchService:
             "after_region": len(after_region),
             "after_body": len(after_body),
             "after_segment": len(after_segment),
+            "segment_excluded": len(after_body) - len(after_segment),
+            "segment_incompatible_excluded": incompatible_segments,
+            "input_segment": source_class.segment_code,
+            "candidate_segment_distribution": dict(
+                Counter(listing.segment_code for listing in after_price)
+            ),
+            "segment_match_type": (
+                "exact"
+                if source_class.segment_code != "UNKNOWN"
+                and any(
+                    listing.segment_code == source_class.segment_code for listing in after_price
+                )
+                else "unknown_fallback"
+            ),
+            "segment_cache_hit": source_class.cache_hit,
+            "segment_code": source_class.segment_code,
+            "segment_method": source_class.segment_method,
+            "segment_confidence": source_class.segment_confidence,
+            "segment_ai_fallback_called": source_class.ai_fallback_called,
             "after_price": len(after_price),
             "direct": len(groups.direct),
             "expensive": len(groups.expensive),
@@ -762,6 +874,31 @@ class SearchService:
             logger.warning("vehicle_classification error_type=%s", type(exc).__name__)
             return None
         return entry.segment
+
+    async def _normalized_segment(
+        self,
+        brand: str,
+        model: str,
+        generation_id: str | None,
+        body_type: BodyType | None,
+        *,
+        allow_ai: bool = False,
+        allow_source_fetch: bool = False,
+    ) -> SegmentClassification:
+        if self.segment_classifier is None:
+            return SegmentClassification()
+        try:
+            return await self.segment_classifier.classify(
+                brand,
+                model,
+                generation_id,
+                body_type,
+                allow_ai=allow_ai,
+                allow_source_fetch=allow_source_fetch,
+            )
+        except Exception as exc:
+            logger.warning("segment_classification error_type=%s", type(exc).__name__)
+            return SegmentClassification()
 
     @classmethod
     def _most_specific_error(cls, errors: list[BaseException]) -> BaseException:

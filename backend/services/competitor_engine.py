@@ -58,6 +58,11 @@ class CompetitorEngine:
             return True
         return source.strip().casefold() == candidate.strip().casefold()
 
+    @staticmethod
+    def normalized_segment_compatible(source: str, candidate: str) -> bool:
+        # Unknown data falls back to the existing family/body/price rules.
+        return source == "UNKNOWN" or candidate == "UNKNOWN" or source == candidate
+
     def classify_price(self, source_price: int, candidate_price: int) -> CompetitorCategory | None:
         ranges = self.calculate_price_ranges(source_price)
         if ranges.direct_min <= candidate_price <= ranges.direct_max:
@@ -81,6 +86,8 @@ class CompetitorEngine:
             )
             if not body_matches or not self.segment_is_compatible(source.segment, listing.segment):
                 continue
+            if not self.normalized_segment_compatible(source.segment_code, listing.segment_code):
+                continue
             category = self.classify_price(reference_price, listing.price)
             if category is None:
                 continue
@@ -91,4 +98,23 @@ class CompetitorEngine:
                 price_difference_percent=round(difference / reference_price * 100, 2),
             )
             getattr(groups, category.value).append(item)
+
+        def rank(item: ClassifiedListing) -> tuple[int, int, int, int]:
+            listing = item.listing
+            return (
+                0
+                if source.segment_code != "UNKNOWN" and source.segment_code == listing.segment_code
+                else 1,
+                0
+                if source.market_position != "unknown"
+                and source.market_position == listing.market_position
+                else 1,
+                abs(item.price_difference),
+                abs(source.reference_year - listing.year)
+                if isinstance(source, SourceVehicle)
+                else abs(source.year - listing.year),
+            )
+
+        for category in (groups.direct, groups.expensive, groups.cheaper):
+            category.sort(key=rank)
         return groups

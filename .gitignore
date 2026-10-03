@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
 data/.pytest-tmp/
+data/.pytest-task2*/
 .ruff_cache/
 data/*.db
 data/*.db-*
@@ -20,6 +21,9 @@ data/catalog_index_*_sample.json
 data/live_smoke_stage1.json
 data/vehicle_catalog_runtime.stage1-before-*.json
 data/browser/
+data/model_cache/
+data/mlruns/
+mlruns/
 logs/*.log
 frontend/node_modules/
 frontend/dist/

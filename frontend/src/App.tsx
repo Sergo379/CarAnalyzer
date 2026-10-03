@@ -1,6 +1,9 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 import { SearchableSelect, type SelectOption } from "./SearchableSelect";
+import { TechnicalKnowledge, type KnowledgeSelection } from "./TechnicalKnowledge";
+import { PriceInput } from "./PriceInput";
+import { formatRubles } from "./price";
 
 import type {
   BodyFilter,
@@ -34,8 +37,8 @@ const initialForm: SearchForm = {
   year: "",
   year_from: "",
   year_to: "",
-  body_type: "",
-  transmission: "",
+  body_type: "any",
+  transmission: "any",
   region: "moscow_and_oblast",
   price_mode: "exact",
   price: "",
@@ -98,11 +101,7 @@ const generationMessages: Record<string, string> = {
   parse_error: "Формат данных о поколениях пока не распознан",
 };
 
-const rubles = new Intl.NumberFormat("ru-RU", {
-  style: "currency",
-  currency: "RUB",
-  maximumFractionDigits: 0,
-});
+const rubles = { format: formatRubles };
 const checkedAt = new Intl.DateTimeFormat("ru-RU", {
   dateStyle: "short",
   timeStyle: "short",
@@ -170,13 +169,13 @@ function Category({ title, subtitle, data }: { title: string; subtitle: string; 
 export default function App() {
   const [form, setForm] = useState<SearchForm>(initialForm);
   const [result, setResult] = useState<SearchResult | null>(null);
+  const [knowledgeSelection, setKnowledgeSelection] = useState<KnowledgeSelection | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [brands, setBrands] = useState<string[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [generations, setGenerations] = useState<CatalogOption[]>([]);
   const [generationState, setGenerationState] = useState("idle");
-  const [engines, setEngines] = useState<CatalogOption[]>([]);
   const [regions, setRegions] = useState<SelectOption[]>(fallbackRegions);
   const yearReady = form.year_mode === "exact"
     ? form.year !== ""
@@ -217,7 +216,6 @@ export default function App() {
 
   useEffect(() => {
     setGenerations([]);
-    setEngines([]);
     setGenerationState("idle");
     if (!form.brand.trim() || !form.model.trim() || !yearReady) return;
     setGenerationState("loading");
@@ -249,24 +247,6 @@ export default function App() {
     return () => controller.abort();
   }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, yearReady]);
 
-  useEffect(() => {
-    setEngines([]);
-    if (!form.brand.trim() || !form.model.trim() || !yearReady || generationState !== "ready") return;
-    const controller = new AbortController();
-    const params = new URLSearchParams({ brand: form.brand, model: form.model });
-    if (form.year_mode === "exact") params.set("year", String(form.year));
-    else {
-      params.set("year_from", String(form.year_from));
-      params.set("year_to", String(form.year_to));
-    }
-    if (form.generation_id) params.set("generation_id", form.generation_id);
-    fetch(`/api/catalog/engines?${params}`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : [])
-      .then((items: CatalogOption[]) => setEngines(items))
-      .catch(() => setEngines([]));
-    return () => controller.abort();
-  }, [form.brand, form.model, form.year_mode, form.year, form.year_from, form.year_to, form.generation_id, yearReady, generationState]);
-
   const brandOptions = useMemo(
     () => brands.map((brand) => ({ value: brand, label: brand })),
     [brands],
@@ -279,18 +259,12 @@ export default function App() {
     () => generations.map((item) => ({ value: item.id, label: item.label })),
     [generations],
   );
-  const engineOptions = useMemo(
-    () => engines.map((item) => ({ value: item.id, label: item.label })),
-    [engines],
-  );
-
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
     if (!form.brand.trim()) return setError("Выберите или напишите марку автомобиля.");
     if (!form.model.trim()) return setError("Выберите или напишите модель автомобиля.");
     if (!yearReady) return setError("Укажите корректный год или диапазон годов.");
-    if (!form.body_type) return setError("Выберите тип кузова.");
     const priceReady = form.price_mode === "exact"
       ? form.price !== ""
       : form.price_from !== "" && form.price_to !== "" && form.price_from <= form.price_to;
@@ -318,6 +292,12 @@ export default function App() {
         throw new Error(`Backend вернул HTTP ${response.status}`);
       }
       setResult(await response.json() as SearchResult);
+      setKnowledgeSelection({
+        brand: form.brand,
+        model: form.model,
+        generation_id: form.generation_id,
+        engine_id: "",
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось выполнить поиск");
     } finally {
@@ -362,9 +342,8 @@ export default function App() {
           <SearchableSelect label="Поколение" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady || generationState !== "ready"} placeholder={form.year_mode === "range" ? "Все поколения в диапазоне" : "Любое поколение"} value={form.generation_id} options={generationOptions} onChange={(generation_id) => setForm({ ...form, generation_id, modification_id: "" })} />
           <small aria-live="polite">{generationState === "ready" ? (generations.length ? "Поколения загружены" : "Для выбранного года поколений нет") : generationMessages[generationState] ?? ""}</small>
         </div>
-        <SearchableSelect label="Двигатель" allowClear disabled={!form.brand.trim() || !form.model.trim() || !yearReady} placeholder="Любой двигатель" value={form.modification_id} options={engineOptions} onChange={(modification_id) => setForm({ ...form, modification_id })} />
-        <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyFilter | "" })}><option value="" disabled>Выбрать кузов</option>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-        <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission | "" })}><option value="" disabled>Тип коробки</option>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <label>Кузов<select value={form.body_type} onChange={(e) => setForm({ ...form, body_type: e.target.value as BodyFilter | "" })}>{Object.entries(bodyLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <label>Коробка<select value={form.transmission} onChange={(e) => setForm({ ...form, transmission: e.target.value as Transmission | "" })}>{Object.entries(transmissionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
         <SearchableSelect label="Регион поиска" required value={form.region} options={regions} onChange={(region) => setForm({ ...form, region: region as SearchRegion })} />
         <div className="range-field">
           <span>Цена, ₽</span>
@@ -373,11 +352,11 @@ export default function App() {
             <button type="button" className={form.price_mode === "range" ? "active" : ""} onClick={() => setForm({ ...form, price_mode: "range" })}>Диапазон</button>
           </div>
           {form.price_mode === "exact" ? (
-            <input required aria-label="Цена" placeholder="Написать цену" type="number" min="1" step="1" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value === "" ? "" : Number(e.target.value) })} />
+            <PriceInput label="Цена" placeholder="Написать цену" value={form.price} onValueChange={(price) => setForm({ ...form, price })} />
           ) : (
             <div className="range-inputs">
-              <input required aria-label="Цена от" placeholder="Цена от" type="number" min="1" step="1" value={form.price_from} onChange={(e) => setForm({ ...form, price_from: e.target.value === "" ? "" : Number(e.target.value) })} />
-              <input required aria-label="Цена до" placeholder="Цена до" type="number" min="1" step="1" value={form.price_to} onChange={(e) => setForm({ ...form, price_to: e.target.value === "" ? "" : Number(e.target.value) })} />
+              <PriceInput label="Цена от" placeholder="Цена от" value={form.price_from} onValueChange={(price_from) => setForm({ ...form, price_from })} />
+              <PriceInput label="Цена до" placeholder="Цена до" value={form.price_to} onValueChange={(price_to) => setForm({ ...form, price_to })} />
             </div>
           )}
         </div>
@@ -393,18 +372,10 @@ export default function App() {
           </section>
           {result.warnings.length > 0 && <div className="alert warning"><strong>Часть источников недоступна</strong>{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
           <Category title="Рынок исходной модели" subtitle="Объявления исходной модели" data={result.source_listings} />
-          <Category title="Прямые конкуренты" subtitle="Рядом по цене" data={result.direct} />
+          <Category title="Прямые конкуренты" subtitle="Сопоставимый класс и тип, близкая рыночная цена" data={result.direct} />
           <Category title="Более дорогие" subtitle="До +20%" data={result.expensive} />
           <Category title="Более дешёвые" subtitle="На 10–20% ниже" data={result.cheaper} />
-          <section className="knowledge">
-            <p className="eyebrow">Знания по моделям результата</p>
-            {Object.entries(result.car_knowledge).map(([key, item]) => (
-              <div key={key}>
-                <h2>{item.profile?.brand} {item.profile?.model}</h2>
-                {item.status === "ai_provider_not_configured" ? <p>Профиль создан. AI не обязателен для поиска; неподтверждённые проблемы не показываются.</p> : <p>Статус: {item.status}</p>}
-              </div>
-            ))}
-          </section>
+          {knowledgeSelection && <TechnicalKnowledge selection={knowledgeSelection} />}
         </>
       )}
     </main>

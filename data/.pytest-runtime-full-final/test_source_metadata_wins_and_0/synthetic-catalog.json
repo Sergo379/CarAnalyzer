@@ -1,0 +1,1 @@
+{"brands": [{"id": "brand-1", "name": "Example Brand", "models": [{"id": "model-1", "name": "Example Model", "classification": {"segment_code": "J-C", "category": "suv"}, "generations": [{"id": "generation-1", "name": "Generation 1", "classification": {"segment_code": "J-D", "category": "suv"}, "body_types": ["crossover"], "source_refs": []}]}]}]}

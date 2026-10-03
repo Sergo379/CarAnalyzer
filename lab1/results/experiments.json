@@ -1,0 +1,704 @@
+[
+  {
+    "config": {
+      "chunk_strategy": "fixed",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "lexical-only",
+    "embedding_version": "none",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9571428571428572,
+      "precision_at_k": 0.2857142857142857,
+      "mrr": 0.9095238095238095,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.3180952380952381,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 0.025
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 1,
+    "mlflow_run_id": "111923caa1dd4543ba3c0c5503a94b28"
+  },
+  {
+    "config": {
+      "chunk_strategy": "section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.32571428571428573,
+      "mrr": 0.9428571428571428,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.32571428571428573,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 23.95
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 2,
+    "mlflow_run_id": null
+  },
+  {
+    "config": {
+      "chunk_strategy": "fixed",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3085714285714286,
+      "mrr": 0.9714285714285714,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3085714285714286,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 24.95
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 3,
+    "mlflow_run_id": "41485d3bc03d4911b4e36fdf2d438254"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3485714285714286,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3485714285714286,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 25.55
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 4,
+    "mlflow_run_id": "5e76a91caa6d4ab0be3b76877ceabf9e"
+  },
+  {
+    "config": {
+      "chunk_strategy": "paragraph",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3028571428571428,
+      "mrr": 0.9714285714285714,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3028571428571428,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 26.075
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 5,
+    "mlflow_run_id": "56a493612a1645b59ae1010c78fa6e76"
+  },
+  {
+    "config": {
+      "chunk_strategy": "section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.32571428571428573,
+      "mrr": 0.9428571428571428,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.32571428571428573,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 24.375
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 6,
+    "mlflow_run_id": "f2797a68315640a0ab65c52029f23b8f"
+  },
+  {
+    "config": {
+      "chunk_strategy": "fixed",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3142857142857143,
+      "mrr": 0.9571428571428572,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3142857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 24.575
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 7,
+    "mlflow_run_id": "b6ae2db4f51a4ba3af29d970237b4c20"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9857142857142858,
+      "precision_at_k": 0.3371428571428572,
+      "mrr": 0.9714285714285714,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3371428571428572,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 23.75
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 8,
+    "mlflow_run_id": "5fbdd5985885474896fea892b148c7d9"
+  },
+  {
+    "config": {
+      "chunk_strategy": "paragraph",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3142857142857143,
+      "mrr": 0.9523809523809524,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3142857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 23.875
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 9,
+    "mlflow_run_id": "7988d87c121d4857ae8cddac6e6c8cd5"
+  },
+  {
+    "config": {
+      "chunk_strategy": "section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.32,
+      "mrr": 0.9428571428571428,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.32,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 24.025
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 10,
+    "mlflow_run_id": "b9aeb92a88ef48d4b8fb8804cb0f5f00"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": true,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.8142857142857143,
+      "precision_at_k": 0.1942857142857143,
+      "mrr": 0.8285714285714286,
+      "hit_rate": 0.8285714285714286,
+      "context_relevance": 0.7761904761904762,
+      "unanswerable_false_positive_rate": 0.0,
+      "mean_latency_ms": 705.35
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 11,
+    "mlflow_run_id": "30e622b20f804100926dac6e492ac854"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": true,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.38285714285714284,
+      "mrr": 0.9523809523809524,
+      "hit_rate": 1.0,
+      "context_relevance": 0.38285714285714284,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 697.5
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 12,
+    "mlflow_run_id": "aef09286b7da4c60aa25fd02d2785c1c"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 3,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.5047619047619047,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.5047619047619047,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 25.125
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 13,
+    "mlflow_run_id": "0597aad3f19f41e59e6fe5d93f98e3eb"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3485714285714286,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3485714285714286,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 27.925
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 14,
+    "mlflow_run_id": "52109bfd9b5849108cd0051c9289701b"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 10,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.19714285714285715,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.19714285714285715,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 27.275
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 15,
+    "mlflow_run_id": "7c73f8a86596460286a91ffa37504ce9"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 20,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.11428571428571428,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.11428571428571428,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 27.0
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 16,
+    "mlflow_run_id": "8503f4103b6c4c298b4c400618d371e1"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.2,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3542857142857143,
+      "mrr": 0.9666666666666668,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3542857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 27.15
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 17,
+    "mlflow_run_id": "aab9fbbf0be24a439de9b36a54dc9409"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.8,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9857142857142858,
+      "precision_at_k": 0.3485714285714286,
+      "mrr": 0.9485714285714286,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3485714285714286,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 26.7
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 18,
+    "mlflow_run_id": "517431aa4a6b4d0aa32e9098de24e236"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.007,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3485714285714286,
+      "mrr": 0.980952380952381,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3485714285714286,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 26.325
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 19,
+    "mlflow_run_id": "e758ebb143c747f0b33762ecee721f67"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.01,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.32571428571428573,
+      "mrr": 0.9523809523809524,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.3433333333333334,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 27.1
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 20,
+    "mlflow_run_id": "41a481f32536490b9826076e778b7eee"
+  },
+  {
+    "config": {
+      "chunk_strategy": "overlap",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": true,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.38285714285714284,
+      "mrr": 0.9523809523809524,
+      "hit_rate": 1.0,
+      "context_relevance": 0.38285714285714284,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 908.95
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 21,
+    "mlflow_run_id": "a8467c176a9c46d29b025c787d2cea9c"
+  },
+  {
+    "config": {
+      "chunk_strategy": "llama-section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.3942857142857143,
+      "mrr": 0.9571428571428572,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.3942857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 25.675
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 22,
+    "mlflow_run_id": "cabe730288864059a34009fc5a2385f9"
+  },
+  {
+    "config": {
+      "chunk_strategy": "llama-section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": false,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "none",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.3942857142857143,
+      "mrr": 0.9571428571428572,
+      "hit_rate": 0.9714285714285714,
+      "context_relevance": 0.3942857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 25.95
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 23,
+    "mlflow_run_id": "393bb54664d04851916e2a7844c4f585"
+  },
+  {
+    "config": {
+      "chunk_strategy": "llama-section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": 0.0,
+      "reranker": true,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.7428571428571429,
+      "precision_at_k": 0.17714285714285716,
+      "mrr": 0.7714285714285715,
+      "hit_rate": 0.7714285714285715,
+      "context_relevance": 0.719047619047619,
+      "unanswerable_false_positive_rate": 0.0,
+      "mean_latency_ms": 699.55
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 24,
+    "mlflow_run_id": "f92dc45341f94e2890d450cb49bb175f"
+  },
+  {
+    "config": {
+      "chunk_strategy": "llama-section",
+      "chunk_words": 40,
+      "overlap_words": 8,
+      "top_k": 5,
+      "lexical_weight": 0.5,
+      "similarity_threshold": -1000000000.0,
+      "reranker": true,
+      "prompt_version": "grounded-v1"
+    },
+    "embedding_model": "intfloat/multilingual-e5-small",
+    "embedding_version": "default",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "question_count": 40,
+    "summary": {
+      "recall_at_k": 0.9714285714285714,
+      "precision_at_k": 0.3542857142857143,
+      "mrr": 0.9642857142857143,
+      "hit_rate": 1.0,
+      "context_relevance": 0.3542857142857143,
+      "unanswerable_false_positive_rate": 1.0,
+      "mean_latency_ms": 727.75,
+      "min_answerable_top_score": -5.158463954925537,
+      "max_unanswerable_top_score": -1.376523494720459
+    },
+    "generation_metrics_status": "not_run_without_atria_key",
+    "database_run_id": 25,
+    "mlflow_run_id": null
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "brands": [
+    {
+      "id": "make",
+      "name": "Make",
+      "source_refs": [],
+      "models": [
+        {
+          "id": "make:alpha",
+          "name": "Alpha",
+          "source_refs": [
+            {
+              "source": "drom.ru",
+              "url": "https://www.drom.ru/catalog/make/alpha/",
+              "path": "/catalog/make/alpha/",
+              "slug": "alpha"
+            }
+          ],
+          "generations": [],
+          "details_updated_at": "2026-09-24T11:41:34.055917+00:00"
+        },
+        {
+          "id": "make:beta",
+          "name": "Beta",
+          "source_refs": [
+            {
+              "source": "drom.ru",
+              "url": "https://www.drom.ru/catalog/make/beta/",
+              "path": "/catalog/make/beta/",
+              "slug": "beta"
+            }
+          ],
+          "generations": [],
+          "details_status": "not_checked"
+        }
+      ]
+    }
+  ]
+}

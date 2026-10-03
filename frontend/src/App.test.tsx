@@ -51,6 +51,7 @@ function response(data: unknown, ok = true) {
 }
 
 let generationResponse: { status: string; generations: { id: string; label: string; name: string }[] };
+let deferredKnowledge: Promise<unknown> | null;
 
 function installFetch(searchResult: unknown = result) {
   return vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
@@ -66,11 +67,14 @@ function installFetch(searchResult: unknown = result) {
       { id: "engine:one", label: "1.6 л · бензин · 105 л.с.", name: "engine" },
     ]) as never;
     if (url.includes("/api/search") && init?.method === "POST") return response(searchResult) as never;
+    if (url.includes("/api/knowledge/profile")) return (deferredKnowledge ?? response({ status: "provider_not_configured" })) as never;
+    if (url.includes("/api/knowledge/sources")) return response({ sources: [] }) as never;
     return response([]) as never;
   });
 }
 
 beforeEach(() => {
+  deferredKnowledge = null;
   generationResponse = { status: "ready", generations: [
     { id: "g1", label: "6 поколение", name: "6 поколение" },
     { id: "g2", label: "7 поколение", name: "7 поколение" },
@@ -80,6 +84,46 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("CarAnalyzer form", () => {
+  it("uses dotted prices for target, averages, min/max, listings and RUB differences", async () => {
+    vi.mocked(fetch).mockRestore();
+    installFetch({ ...result, direct: {
+      listings: result.source_listings.listings,
+      model_groups: [{ brand: "Example Brand", model: "Example Model", listings_count: 2,
+        average_price: 1000000, min_price: 900000, max_price: 1100000 }],
+    } });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: result.source_vehicle.brand } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: result.source_vehicle.model } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: String(result.source_vehicle.year) } });
+    fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700.000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    expect(await screen.findByText("1.000.000 ₽")).toBeInTheDocument();
+    expect(screen.getByText("900.000 ₽ — 1.100.000 ₽")).toBeInTheDocument();
+    expect(screen.getAllByText("710.000 ₽")).toHaveLength(2);
+    expect(screen.getAllByText("+10.000 ₽")).toHaveLength(2);
+    expect(screen.getByText(/700\.000 ₽/)).toBeInTheDocument();
+    const payload = JSON.parse(String(vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes("/api/search"))?.[1]?.body));
+    expect(payload.price).toBe(700000);
+    expect(typeof payload.price).toBe("number");
+  });
+
+  it("submits numeric price ranges even when inputs contain separators", async () => {
+    vi.mocked(fetch).mockRestore();
+    installFetch({ ...result, source_vehicle: { ...result.source_vehicle,
+      price_mode: "range", price: null, price_from: 1000000, price_to: 2000000 } });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: result.source_vehicle.brand } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: result.source_vehicle.model } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: String(result.source_vehicle.year) } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Диапазон" })[1]);
+    fireEvent.change(screen.getByLabelText("Цена от"), { target: { value: "1.000.000" } });
+    fireEvent.change(screen.getByLabelText("Цена до"), { target: { value: "2 000 000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    await screen.findByText("Рынок исходной модели");
+    expect(screen.getByText(/1\.000\.000 ₽ — 2\.000\.000 ₽/)).toBeInTheDocument();
+    const payload = JSON.parse(String(vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes("/api/search"))?.[1]?.body));
+    expect(payload).toMatchObject({ price_mode: "range", price: null, price_from: 1000000, price_to: 2000000 });
+  });
   it("shows an explicit no-generation status without selecting an option", async () => {
     generationResponse = { status: "source_has_no_generation_data", generations: [] };
     render(<App />);
@@ -112,11 +156,14 @@ describe("CarAnalyzer form", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: "Fiesta" })).toBeInTheDocument());
     expect(screen.getByRole("option", { name: "Любой кузов" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Любая" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Кузов")).toHaveValue("any");
+    expect(screen.getByLabelText("Коробка")).toHaveValue("any");
+    expect(screen.queryByLabelText("Двигатель")).not.toBeInTheDocument();
     expect(screen.getByText("Точный год")).toBeInTheDocument();
     expect(screen.getAllByText("Диапазон")).toHaveLength(2);
   });
 
-  it("resets generation and engine when model/year/generation dependencies change", async () => {
+  it("resets generation when model/year dependencies change and hides engine input", async () => {
     render(<App />);
     const [brand, model] = screen.getAllByRole("combobox");
     fireEvent.change(brand, { target: { value: "Ford" } });
@@ -127,11 +174,9 @@ describe("CarAnalyzer form", () => {
     fireEvent.focus(generation);
     await waitFor(() => expect(screen.getByRole("option", { name: "6 поколение" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("option", { name: "6 поколение" }));
-    fireEvent.focus(screen.getByLabelText("Двигатель"));
-    await waitFor(() => expect(screen.getByRole("option", { name: /1.6 л/ })).toBeInTheDocument());
+    expect(screen.queryByLabelText("Двигатель")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Focus" } });
     expect(screen.getByLabelText("Поколение")).toHaveValue("");
-    expect(screen.getByLabelText("Двигатель")).toHaveValue("");
   });
 
   it("submits exact/range payload with region, ANY filters, and reference price", async () => {
@@ -140,8 +185,6 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
     fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
-    fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
-    fireEvent.change(screen.getByLabelText("Коробка"), { target: { value: "any" } });
     fireEvent.focus(screen.getByLabelText("Регион поиска"));
     await waitFor(() => expect(screen.getByRole("option", { name: "Республика Татарстан" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("option", { name: "Республика Татарстан" }));
@@ -175,5 +218,31 @@ describe("CarAnalyzer form", () => {
     const link = screen.getByRole("link", { name: /Открыть/ });
     expect(link).toHaveAttribute("href", result.source_listings.listings[0].listing.url);
     expect(link).toHaveAttribute("rel", "noreferrer");
+  });
+
+  it("renders market results before the independent knowledge request finishes", async () => {
+    let finishKnowledge: (value: unknown) => void = () => {};
+    deferredKnowledge = new Promise((resolve) => { finishKnowledge = resolve; });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
+    fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
+    fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    await waitFor(() => expect(screen.getByText("Рынок исходной модели")).toBeInTheDocument());
+    expect(screen.getByText("Проверяем локальный профиль…")).toBeInTheDocument();
+    finishKnowledge(await response({
+      status: "cached", scope_key: "scope", scope_level: "model",
+      profile: {
+        status: "complete", common_problems: [], problematic_components: [],
+        inspection_points: [{ title: "Проверка цепи", description: "Проверить шум при запуске",
+          component: "engine", scope_key: "scope", evidence_refs: [1],
+          support_source_count: 2, confidence: "medium" }],
+        expensive_failures: [], risk_summary: "", confidence: "medium",
+        source_count: 2, evidence_count: 1,
+      },
+    }));
+    await waitFor(() => expect(screen.getByText("Проверка цепи")).toBeInTheDocument());
   });
 });
