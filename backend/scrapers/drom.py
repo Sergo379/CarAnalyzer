@@ -25,6 +25,7 @@ from backend.scrapers.base import (
     HttpAutomationLimitedError,
     ScraperParseError,
 )
+from backend.services.drom_model_mapping import DromModelResolver
 from backend.services.marketplace_catalog import CatalogCache, get_catalog_cache
 from backend.services.normalizer import Normalizer
 from backend.services.regions import drom_region_prefix, drom_region_query
@@ -113,6 +114,16 @@ class DromScraper(BaseScraper):
         return response
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
+        identity = self.catalog.resolve_identity(query.brand, query.model)
+        if self.catalog.source_model_ref("drom.ru", identity.brand, identity.model) is None:
+            if (
+                self.catalog.source_model_ref("cars-base.ru", identity.brand, identity.model)
+                is None
+            ):
+                raise ScraperParseError("Drom catalog has no model mapping")
+            state = await DromModelResolver(self.catalog).resolve(identity.brand, identity.model)
+            if state != "mapped":
+                raise ScraperParseError(f"Drom model mapping unavailable: {state}")
         target_queries = self._target_body_queries(query)
         target_by_url = {self.build_search_url(item): item for item in target_queries}
         first_url = next(iter(target_by_url))
@@ -121,7 +132,6 @@ class DromScraper(BaseScraper):
         listings: list[CarListing] = []
         seen: set[str] = set()
         failures: list[Exception] = []
-        identity = self.catalog.resolve_identity(query.brand, query.model)
         model_ref = self.catalog.source_model_ref("drom.ru", identity.brand, identity.model)
         expected_slug = model_ref.slug if model_ref else None
         async with self._session() as client:

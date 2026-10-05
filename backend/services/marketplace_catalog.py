@@ -622,6 +622,7 @@ class CatalogCache:
     def status(self) -> dict[str, object]:
         payload = self.load()
         brands = payload.get("brands", [])
+        carsbase = payload.get("sources", {}).get("cars-base.ru", {})
         generations = [
             generation
             for brand in brands
@@ -635,6 +636,7 @@ class CatalogCache:
             "generation_count": len(generations),
             "modification_count": sum(len(item.get("modifications", [])) for item in generations),
             "sources": payload.get("sources", {}),
+            "carsbase": carsbase,
         }
 
     def save(self, payload: dict[str, object]) -> None:
@@ -999,14 +1001,20 @@ class CatalogEnrichmentService:
         entry = self.cache.model_entry(brand, model)
         if entry is None:
             return "source_unavailable"
-        if self.cache.source_model_ref("drom.ru", brand, model) is None:
-            return "source_not_supported_for_details"
         if self.cache.details_are_fresh_window(brand, model, 0, 0):
             return str(
                 entry.get(
                     "details_status", "complete" if entry.get("generations") else "not_checked"
                 )
             )
+        if self.cache.source_model_ref("drom.ru", brand, model) is None:
+            if self.cache.source_model_ref("cars-base.ru", brand, model) is None:
+                return "source_not_supported_for_details"
+            from backend.services.drom_model_mapping import DromModelResolver
+
+            mapping = await DromModelResolver(self.cache).resolve(brand, model)
+            if mapping != "mapped":
+                return "rate_limited" if mapping == "rate_limited" else "source_unavailable"
         lock = _MODEL_ENRICH_LOCKS.setdefault(f"{brand}|{model}", asyncio.Lock())
         async with lock:
             self.cache._payload = None
@@ -1041,7 +1049,16 @@ class CatalogEnrichmentService:
             )
         ref = self.cache.source_model_ref("drom.ru", brand, model)
         if ref is None:
-            return "source_not_supported_for_details"
+            if self.cache.source_model_ref("cars-base.ru", brand, model) is None:
+                return "source_not_supported_for_details"
+            from backend.services.drom_model_mapping import DromModelResolver
+
+            mapping = await DromModelResolver(self.cache).resolve(brand, model, client)
+            if mapping != "mapped":
+                return "rate_limited" if mapping == "rate_limited" else "source_unavailable"
+            ref = self.cache.source_model_ref("drom.ru", brand, model)
+            if ref is None:
+                return "source_unavailable"
         url = ref.url.rstrip("/") + "/"
         try:
             response = await client.get(url)
@@ -1373,8 +1390,24 @@ class CatalogEnrichmentService:
 
 async def _run() -> None:
     parser = argparse.ArgumentParser(description="Refresh the local marketplace catalog cache")
-    parser.add_argument("--source", choices=("all", "auto.ru", "drom.ru"), default="all")
+    parser.add_argument(
+        "--source", choices=("cars-base.ru", "all", "auto.ru", "drom.ru"), default="cars-base.ru"
+    )
+    parser.add_argument(
+        "--audit", action="store_true", help="CarsBase dry-run without catalog writes"
+    )
+    parser.add_argument("--force", action="store_true", help="Import CarsBase even when unchanged")
     args = parser.parse_args()
+    if args.source == "cars-base.ru":
+        from backend.services.carsbase_catalog import CarsBaseSyncService
+
+        result = await CarsBaseSyncService().sync(force=args.force, dry_run=args.audit)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result["status"] in {"error", "rate_limited"}:
+            raise SystemExit(2)
+        return
+    if args.audit or args.force:
+        parser.error("--audit and --force apply only to --source cars-base.ru")
     sources = {"auto.ru": auto_ru_source, "drom.ru": drom_source}
     selected = list(sources) if args.source == "all" else [args.source]
     status = await CatalogSyncService([sources[name]() for name in selected]).sync()

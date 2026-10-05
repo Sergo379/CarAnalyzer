@@ -75,6 +75,15 @@ interface KnowledgeResponse {
 const completedStatuses = new Set(["complete", "partial", "cached", "rebuild_preserved"]);
 const activeStatuses = new Set(["building", "queued", "calling_gemini", "provider_retry", "generating", "retrieving", "reranking", "validating", "saving"]);
 
+function requestErrorMessage(reason: unknown): string {
+  if (reason instanceof DOMException && reason.name === "TimeoutError") return "истекло время ожидания ответа";
+  if (reason instanceof TypeError) return "нет связи с сервером";
+  if (reason instanceof Error && /^HTTP \d{3}$/.test(reason.message)) {
+    return `сервер ответил ${reason.message}`;
+  }
+  return "не удалось связаться с сервером";
+}
+
 interface KnowledgeSource {
   url: string;
   title: string;
@@ -225,6 +234,8 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
   const [sources, setSources] = useState<KnowledgeSource[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [startingBuild, setStartingBuild] = useState(false);
+  const startBuildRef = useRef<(force?: boolean) => void>(() => {});
   const requestGeneration = useRef(0);
   const key = JSON.stringify(selection);
 
@@ -233,6 +244,7 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
     let cancelled = false;
     let timer: number | undefined;
     const controller = new AbortController();
+    let buildStarting = false;
     const isCurrent = () => !cancelled && requestGeneration.current === generation;
     const params = new URLSearchParams({ brand: selection.brand, model: selection.model });
     if (selection.generation_id) params.set("generation_id", selection.generation_id);
@@ -278,6 +290,7 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
         ? { ...next, profile: current.profile, scope_level: current.scope_level }
         : next);
       if (activeStatuses.has(next.status) && isCurrent()) {
+        if (timer) window.clearTimeout(timer);
         timer = window.setTimeout(poll, 3000);
       }
       if (next.profile) {
@@ -291,7 +304,7 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
         await update(status, completedStatuses.has(status.status));
       } catch (reason) {
         if (isCurrent()) {
-          setError(reason instanceof Error ? reason.message : "Ошибка загрузки знаний");
+          setError(requestErrorMessage(reason));
           // A transient status/profile fetch failure is not a terminal build state.
           timer = window.setTimeout(poll, 3000);
         }
@@ -301,40 +314,44 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
     async function start() {
       try {
         if (!isCurrent()) return;
-        setResponse(null); setSources([]); setError(null);
+        setResponse(null); setSources([]); setError(null); setStartingBuild(false);
         const existing = await read(`/api/knowledge/profile?${query}`);
         if (!isCurrent()) return;
-        if (existing.status === "not_found" || existing.status === "fallback_cached") {
-          if (existing.status === "fallback_cached") await update(existing);
-          const building = await read("/api/knowledge/build", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(buildSelection),
-          });
-          await update(existing.status === "fallback_cached"
-            ? { ...building, profile: existing.profile, scope_level: existing.scope_level }
-            : building);
-        } else {
-          await update(existing);
-          if (existing.status === "cached" && existing.profile?.status === "complete" &&
-            existing.profile.profile_version === 1 && isCurrent()) {
-            const building = await read("/api/knowledge/rebuild", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(buildSelection),
-            });
-            await update({ ...building, profile: existing.profile, scope_level: existing.scope_level });
-          }
-        }
+        await update(existing);
       } catch (reason) {
         if (isCurrent()) {
-          setError(reason instanceof Error ? reason.message : "Ошибка загрузки знаний");
+          setError(requestErrorMessage(reason));
         }
       }
     }
 
+    async function beginBuild(force = false) {
+      if (!isCurrent() || buildStarting) return;
+      buildStarting = true;
+      setStartingBuild(true);
+      setError(null);
+      try {
+        const building = await read(force ? "/api/knowledge/rebuild" : "/api/knowledge/build", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildSelection),
+        });
+        await update(building);
+      } catch (reason) {
+        if (isCurrent()) {
+          setError(requestErrorMessage(reason));
+        }
+      } finally {
+        buildStarting = false;
+        if (isCurrent()) setStartingBuild(false);
+      }
+    }
+
+    startBuildRef.current = (force) => { void beginBuild(force); };
     void start();
     return () => {
       cancelled = true;
       controller.abort();
+      startBuildRef.current = () => {};
       if (timer) window.clearTimeout(timer);
     };
   }, [key, retry]);
@@ -343,10 +360,12 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
   return <section className="knowledge" aria-live="polite">
     <h2>Техническая проверка при выкупе</h2>
     <p className="eyebrow">{selection.brand} {selection.model}</p>
-    {error && <p>Не удалось получить технические знания: {error}</p>}
+    {error && <p>Технический анализ сейчас недоступен: {error}. Рыночные результаты не затронуты; попробуйте позже.</p>}
+    {error && !response && <button type="button" onClick={() => setRetry((value) => value + 1)}>Повторить проверку профиля</button>}
     {!error && !response && <p>Проверяем локальный профиль…</p>}
     {response && activeStatuses.has(response.status) && <KnowledgeProgress response={response} />}
-    {response?.status === "fallback_cached" && <p>Показаны общие данные; уточняем сведения для выбранной конфигурации…</p>}
+    {response?.status === "not_found" && <p>Сохранённого технического профиля пока нет. Анализ запускается только по вашему запросу.</p>}
+    {response?.status === "fallback_cached" && <p>Показаны общие данные; точный анализ выбранной конфигурации можно запустить вручную.</p>}
     {response?.status === "provider_not_configured" && <p>Провайдер Gemini не настроен. Рыночный поиск работает независимо; неподтверждённые технические проблемы не показываются.</p>}
     {response?.status === "no_sources" && <p>Технические источники для этого автомобиля не найдены.</p>}
     {response?.status === "blocked" && <p>Источник ограничил автоматический доступ. Проверку можно повторить позднее вручную.</p>}
@@ -362,8 +381,17 @@ export function TechnicalKnowledge({ selection }: { selection: KnowledgeSelectio
     {response?.status === "provider_model_unavailable" && <p>Выбранная модель Gemini недоступна для этого ключа.</p>}
     {response?.status === "invalid_response" && <p>Gemini вернул некорректный формат ответа; профиль не сохранён.</p>}
     {response?.status === "structured_validation_failed" && <p>Ответ Gemini не прошёл проверку подтверждений; профиль не сохранён.</p>}
-    {(["failed", "provider_rate_limited", "provider_temporarily_unavailable", "provider_timeout", "invalid_response", "structured_validation_failed"].includes(response?.status ?? "")) &&
-      <button type="button" onClick={() => setRetry((value) => value + 1)}>Повторить сбор знаний</button>}
+    {response && !activeStatuses.has(response.status) && (
+      ["not_found", "fallback_cached", "provider_not_configured", "no_sources", "insufficient_evidence",
+        "blocked", "timeout", "parse_error", "search_provider_unavailable", "failed",
+        "provider_rate_limited", "provider_temporarily_unavailable", "provider_timeout",
+        "provider_auth_error", "provider_invalid_request", "provider_model_unavailable",
+        "invalid_response", "structured_validation_failed"].includes(response.status) ||
+      (response.status === "cached" && profile?.profile_version === 1)
+    ) && <button type="button" disabled={startingBuild} onClick={() => startBuildRef.current(
+      Boolean(profile && response.status !== "fallback_cached"),
+    )}>{startingBuild ? "Запускаем анализ…" : response.status === "not_found" || response.status === "fallback_cached" || response.status === "provider_not_configured"
+      ? "Запустить технический анализ" : "Повторить технический анализ"}</button>}
     {response?.status === "rebuild_preserved" && <p>Новое подтверждение не получено; показан ранее сохранённый профиль.</p>}
     {(response?.status === "insufficient_evidence" || profile?.status === "insufficient_evidence") && <p>Недостаточно подтверждений для технических утверждений.</p>}
     {(response?.status === "no_sources" || response?.status === "insufficient_evidence" || profile?.status === "insufficient_evidence") && <GeneralChecklist />}

@@ -38,6 +38,14 @@ PSEUDO_NAMES = frozenset(
 
 def _valid_ref(ref: dict) -> bool:
     parsed = urlparse(str(ref.get("url", "")))
+    if ref.get("source") == "cars-base.ru":
+        return (
+            parsed.scheme == "https"
+            and parsed.netloc == "api.cars-base.ru"
+            and parsed.path == "/full"
+            and ref.get("path") == "/full"
+            and bool(ref.get("external_id"))
+        )
     return (
         parsed.scheme == "https"
         and bool(parsed.netloc)
@@ -95,7 +103,10 @@ def audit_catalog(
             for ref in refs:
                 if not _valid_ref(ref):
                     errors.append({"id": model_id, "type": "invalid_source_ref", "ref": ref})
-                source_key = (str(ref.get("source", "")), str(ref.get("url", "")))
+                source_key = (
+                    str(ref.get("source", "")),
+                    str(ref.get("external_id") or ref.get("url", "")),
+                )
                 owner = source_ref_owners.setdefault(source_key, model_id)
                 if owner != model_id:
                     errors.append(
@@ -239,7 +250,7 @@ def audit_catalog(
             )
             stored_refs = len(
                 {
-                    str(ref.get("url"))
+                    str(ref.get("external_id") or ref.get("url"))
                     for model in brand.get("models", [])
                     for ref in model.get("source_refs", [])
                     if ref.get("source") == source

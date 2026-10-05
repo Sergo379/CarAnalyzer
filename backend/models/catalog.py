@@ -11,6 +11,7 @@ class SourceReference(BaseModel):
     url: str
     path: str
     slug: str
+    external_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class EngineSpec(BaseModel):
@@ -60,6 +61,7 @@ class CatalogModel(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
     source_refs: list[SourceReference] = Field(default_factory=list)
+    carsbase_metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
     generations: list[VehicleGeneration] = Field(default_factory=list)
     details_updated_at: datetime | None = None
     details_parser_version: int | None = None
@@ -82,6 +84,7 @@ class CatalogBrand(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
     source_refs: list[SourceReference] = Field(default_factory=list)
+    carsbase_metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
     models: list[CatalogModel] = Field(default_factory=list)
 
 

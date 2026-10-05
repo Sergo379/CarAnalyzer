@@ -10,7 +10,6 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from backend.config import Settings, get_settings
-from backend.knowledge.gemini import GeminiProvider
 from backend.models.car import (
     BodyFilter,
     BodyType,
@@ -139,12 +138,8 @@ class SearchService:
         self.engine = engine or CompetitorEngine()
         self.knowledge = knowledge or CarKnowledgeService()
         self.marketplace_catalog = shared_catalog
-        provider = GeminiProvider()
         self.segment_classifier = segment_classifier or (
-            SegmentClassifier(
-                shared_catalog,
-                ai_fallback=provider.classify_segment if provider.configured else None,
-            )
+            SegmentClassifier(shared_catalog)
             if isinstance(self.catalog, VehicleCatalog)
             else None
         )
@@ -222,7 +217,7 @@ class SearchService:
             normalized.model,
             normalized.generation_id,
             concrete_body,
-            allow_ai=True,
+            allow_ai=False,
             allow_source_fetch=True,
         )
         generation = str(selected_generation["name"]) if selected_generation else None

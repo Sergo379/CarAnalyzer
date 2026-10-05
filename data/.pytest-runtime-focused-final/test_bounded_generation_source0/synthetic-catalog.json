@@ -1,1 +1,0 @@
-{"brands": [{"id": "brand-1", "name": "Example Brand", "models": [{"id": "model-1", "name": "Example Model", "classification": {}, "generations": [{"id": "generation-1", "name": "Generation 1", "classification": {}, "body_types": ["crossover"], "source_refs": [{"source": "drom.ru", "url": "https://www.drom.ru/catalog/example/gen/"}]}]}]}]}

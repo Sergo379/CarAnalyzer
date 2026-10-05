@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -12,7 +13,15 @@ from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
 from backend.config import Settings, get_settings
-from backend.models.car import MarketDiscoveryRequest, SearchRegion, SearchRequest
+from backend.models.car import (
+    BodyFilter,
+    BodyType,
+    MarketDiscoveryRequest,
+    RangeMode,
+    SearchRegion,
+    SearchRequest,
+    Transmission,
+)
 from backend.models.listing import CarListing, SourceDiagnostics
 from backend.scrapers.base import (
     AuthenticationRequiredError,
@@ -25,9 +34,11 @@ from backend.scrapers.base import (
     ScraperParseError,
 )
 from backend.services.normalizer import Normalizer
+from backend.services.regions import location_matches
 
 _YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
-_ID = re.compile(r"_(\d+)(?:\?.*)?$")
+_ID = re.compile(r"_(\d+)/?$")
+_EMPTY_TEXT = ("ничего не найдено", "объявления не найдены", "нет объявлений")
 
 
 class AvitoScraper(BaseScraper):
@@ -49,40 +60,130 @@ class AvitoScraper(BaseScraper):
         self._browser_pages: dict[str, bytes] = {}
 
     async def search(self, query: SearchRequest) -> list[CarListing]:
+        url = self.build_target_url(query)
+        diagnostic = self.reset_diagnostics("target", url)
+        listings = await self._collect(url, diagnostic, query=query)
+        diagnostic.accepted_count = len(listings)
+        return listings
+
+    @staticmethod
+    def _identity(card: Tag, title: str, query: SearchRequest | None) -> tuple[str, str]:
+        brand_node = card.find(attrs={"itemprop": "brand"})
+        model_node = card.find(attrs={"itemprop": "model"})
+        if isinstance(brand_node, Tag) and isinstance(model_node, Tag):
+            brand = str(brand_node.get("content") or brand_node.get_text(" ", strip=True))
+            model = str(model_node.get("content") or model_node.get_text(" ", strip=True))
+            if brand.strip() and model.strip():
+                return brand, model
+
+        for script in card.find_all("script", attrs={"type": "application/ld+json"}):
+            try:
+                data = json.loads(script.string or "")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            brand = data.get("brand")
+            if isinstance(brand, dict):
+                brand = brand.get("name")
+            model = data.get("model")
+            if (
+                isinstance(brand, str)
+                and brand.strip()
+                and isinstance(model, str)
+                and model.strip()
+            ):
+                return brand, model
+
+        if query is not None:
+            # A target URL is only a search hint, not evidence of a card's identity.
+            expected = f"{query.brand} {query.model}"
+            if re.match(rf"^{re.escape(expected)}(?=$|[^\w])", title, re.I):
+                return query.brand, query.model
+        raise ValueError("missing verified brand/model")
+
+    @classmethod
+    def build_target_url(cls, query: SearchRequest) -> str:
         years = (
             str(query.effective_year_from)
             if query.effective_year_from == query.effective_year_to
             else f"{query.effective_year_from}-{query.effective_year_to}"
         )
         params = urlencode({"q": f"{query.brand} {query.model} {years}"})
-        url = f"https://www.avito.ru/{self._region_path(query.region)}/avtomobili?{params}"
-        diagnostic = self.reset_diagnostics("target", url)
-        content = await self._content(url, diagnostic)
-        listings = self.parse_listings(content, query=query, diagnostic=diagnostic)
-        diagnostic.accepted_count = len(listings)
-        if not listings:
-            raise ScraperParseError("Avito page is accessible but has no recognized target cards")
-        return listings
+        return f"https://www.avito.ru/{cls._region_path(query.region)}/avtomobili?{params}"
 
     async def discover(self, query: MarketDiscoveryRequest) -> list[CarListing]:
+        url = self.build_discovery_url(query)
+        diagnostic = self.reset_diagnostics("competitors", url)
+        listings = await self._collect(url, diagnostic)
+        accepted = []
+        for item in listings:
+            reason = self._discovery_rejection_reason(item, query)
+            if reason:
+                diagnostic.rejected[reason] = diagnostic.rejected.get(reason, 0) + 1
+            else:
+                accepted.append(item)
+        diagnostic.accepted_count = len(accepted)
+        return accepted
+
+    @classmethod
+    def build_discovery_url(cls, query: MarketDiscoveryRequest) -> str:
         params = urlencode({"pmin": query.price_from, "pmax": query.price_to})
-        url = (
-            f"https://www.avito.ru/{self._region_path(query.source_vehicle.region)}/"
+        return (
+            f"https://www.avito.ru/{cls._region_path(query.source_vehicle.region)}/"
             f"avtomobili?{params}"
         )
-        diagnostic = self.reset_diagnostics("competitors", url)
-        content = await self._content(url, diagnostic)
-        listings = self.parse_listings(content, diagnostic=diagnostic)
-        accepted = [
-            item
-            for item in listings
-            if query.price_from <= item.price <= query.price_to
-            and item.body_type in query.body_types
-        ]
-        diagnostic.accepted_count = len(accepted)
-        if not listings:
-            raise ScraperParseError("Avito page is accessible but has no recognized broad cards")
-        return accepted
+
+    async def _collect(
+        self,
+        url: str,
+        diagnostic: SourceDiagnostics,
+        query: SearchRequest | None = None,
+    ) -> list[CarListing]:
+        listings: list[CarListing] = []
+        seen_ids: set[str] = set()
+        seen_urls: set[str] = set()
+        current_url: str | None = url
+        page_limit = min(self.settings.live_search_max_pages, self.settings.scraper_max_pages)
+        while current_url and len(seen_urls) < page_limit:
+            if current_url in seen_urls:
+                break
+            seen_urls.add(current_url)
+            try:
+                content = await self._content(current_url, diagnostic)
+            except (ScraperError, TimeoutError) as exc:
+                if not listings:
+                    raise
+                diagnostic.degraded = True
+                diagnostic.partial_failures += 1
+                diagnostic.notes.append(f"Later Avito page failed: {type(exc).__name__}")
+                break
+            diagnostic.pages_scanned += 1
+            diagnostic.resolved_urls.append(current_url)
+            raw_before = diagnostic.raw_count
+            parsed_before = diagnostic.parsed_count
+            page = self.parse_listings(content, query=query, diagnostic=diagnostic)
+            if diagnostic.raw_count > raw_before and diagnostic.parsed_count == parsed_before:
+                if not listings:
+                    raise ScraperParseError("Avito cards have no parseable listing data")
+                diagnostic.degraded = True
+                diagnostic.partial_failures += 1
+                break
+            new = [item for item in page if item.external_id not in seen_ids]
+            if not new:
+                break
+            for item in new:
+                seen_ids.add(item.external_id)
+                if query is not None:
+                    reason = self._target_rejection_reason(item, query)
+                    if reason:
+                        diagnostic.rejected[reason] = diagnostic.rejected.get(reason, 0) + 1
+                        continue
+                listings.append(item)
+                if len(listings) >= self.settings.scraper_max_listings:
+                    return listings
+            current_url = self._next_page_url(content, current_url)
+        return listings
 
     async def _content(self, url: str, diagnostic: SourceDiagnostics) -> bytes:
         async with httpx.AsyncClient(
@@ -99,9 +200,12 @@ class AvitoScraper(BaseScraper):
             except httpx.HTTPError as exc:
                 raise ScraperError("Avito HTTP request failed") from exc
         self._detect_interruption(response)
-        if self._has_listing_cards(response.content):
+        if self._has_listing_cards(response.content) or self._is_valid_empty(response.content):
             return response.content
-        return await self._browser_content(url, diagnostic)
+        content = await self._browser_content(url, diagnostic)
+        if not self._has_listing_cards(content) and not self._is_valid_empty(content):
+            raise ScraperParseError("Avito browser page has no listing or empty-result content")
+        return content
 
     async def _browser_content(self, url: str, diagnostic: SourceDiagnostics) -> bytes:
         async with self._browser_lock:
@@ -149,13 +253,16 @@ class AvitoScraper(BaseScraper):
                 if not isinstance(anchor, Tag):
                     raise ValueError("missing listing link")
                 url = urljoin("https://www.avito.ru", str(anchor["href"]))
-                id_match = _ID.search(urlparse(url).path)
+                parsed_url = urlparse(url)
+                if parsed_url.netloc not in {"www.avito.ru", "avito.ru"}:
+                    raise ValueError("listing link is not Avito")
+                id_match = _ID.search(parsed_url.path)
                 if id_match is None:
                     raise ValueError("missing listing id")
                 external_id = id_match.group(1)
                 if external_id in seen:
                     continue
-                title = anchor.get_text(" ", strip=True)
+                title = anchor.get_text(" ", strip=True) or str(anchor.get("title") or "")
                 text = card.get_text(" ", strip=True)
                 year_match = _YEAR.search(title)
                 if year_match is None:
@@ -163,25 +270,15 @@ class AvitoScraper(BaseScraper):
                 price_node = card.find(attrs={"itemprop": "price"}) or card.find(
                     attrs={"data-marker": "item-price"}
                 )
+                if not isinstance(price_node, Tag):
+                    raise ValueError("missing listing price")
                 price_text = (
                     str(price_node.get("content"))
-                    if isinstance(price_node, Tag) and price_node.get("content")
+                    if price_node.get("content")
                     else price_node.get_text(" ", strip=True)
-                    if isinstance(price_node, Tag)
-                    else text
                 )
                 body = Normalizer.body_type_from_text(text)
-                if body is None:
-                    raise ValueError("missing body type")
-                if query is not None:
-                    brand, model = query.brand, query.model
-                else:
-                    brand_node = card.find(attrs={"itemprop": "brand"})
-                    model_node = card.find(attrs={"itemprop": "model"})
-                    if not isinstance(brand_node, Tag) or not isinstance(model_node, Tag):
-                        raise ValueError("missing structured brand/model")
-                    brand = str(brand_node.get("content") or brand_node.get_text(" ", strip=True))
-                    model = str(model_node.get("content") or model_node.get_text(" ", strip=True))
+                brand, model = cls._identity(card, title, query)
                 location_node = card.find(attrs={"data-marker": "item-address"})
                 location = (
                     location_node.get_text(" ", strip=True)
@@ -193,40 +290,92 @@ class AvitoScraper(BaseScraper):
                     external_id=external_id,
                     brand=Normalizer.brand(brand),
                     model=Normalizer.model(model),
-                    modification=title,
+                    modification=None,
                     year=int(year_match.group()),
                     body_type=body,
                     transmission=Normalizer.transmission_from_text(text),
                     price=Normalizer.price(price_text),
                     url=url,
                     location=location,
-                    city=location,
+                    city=None,
                     checked_at=datetime.now(UTC),
                     raw_metadata={"title": title},
                 )
-                if query is not None and not cls._target_matches(listing, query):
-                    continue
             except (ValidationError, ValueError):
                 if diagnostic is not None:
                     diagnostic.rejected["parse"] = diagnostic.rejected.get("parse", 0) + 1
                 continue
             seen.add(external_id)
+            if diagnostic is not None:
+                diagnostic.parsed_count += 1
             listings.append(listing)
-        if diagnostic is not None:
-            diagnostic.parsed_count += len(listings)
         return listings
 
     @staticmethod
-    def _target_matches(listing: CarListing, query: SearchRequest) -> bool:
-        return (
-            query.effective_year_from <= listing.year <= query.effective_year_to
-            and (query.body_type.value == "any" or listing.body_type.value == query.body_type.value)
-            and (query.transmission.value == "any" or listing.transmission == query.transmission)
-        )
+    def _target_rejection_reason(listing: CarListing, query: SearchRequest) -> str | None:
+        if listing.brand.casefold() != Normalizer.brand(query.brand).casefold() or (
+            listing.model.casefold() != query.model.casefold()
+        ):
+            return "model"
+        if not query.effective_year_from <= listing.year <= query.effective_year_to:
+            return "year"
+        if query.price_mode == RangeMode.RANGE and not (
+            query.effective_price_from <= listing.price <= query.effective_price_to
+        ):
+            return "price"
+        if query.body_type != BodyFilter.ANY and (
+            listing.body_type is None or listing.body_type.value != query.body_type.value
+        ):
+            return "body"
+        if query.transmission != Transmission.ANY and listing.transmission != query.transmission:
+            return "transmission"
+        if not location_matches(query.region, listing.location, listing.city, listing.region):
+            return "region"
+        return None
+
+    @staticmethod
+    def _discovery_rejection_reason(
+        listing: CarListing, query: MarketDiscoveryRequest
+    ) -> str | None:
+        if not query.price_from <= listing.price <= query.price_to:
+            return "price"
+        if len(query.body_types) != len(BodyType) and listing.body_type not in query.body_types:
+            return "body"
+        if not location_matches(
+            query.source_vehicle.region, listing.location, listing.city, listing.region
+        ):
+            return "region"
+        return None
 
     @staticmethod
     def _has_listing_cards(content: bytes) -> bool:
         return bool(BeautifulSoup(content, "lxml").find(attrs={"data-marker": "item"}))
+
+    @staticmethod
+    def _is_valid_empty(content: bytes) -> bool:
+        soup = BeautifulSoup(content, "lxml")
+        text = soup.get_text(" ", strip=True).casefold()
+        return any(message in text for message in _EMPTY_TEXT)
+
+    @staticmethod
+    def _next_page_url(content: bytes, current_url: str) -> str | None:
+        soup = BeautifulSoup(content, "lxml")
+        anchor = soup.select_one(
+            'a[rel="next"][href], a[data-marker="pagination-button/next"][href]'
+        )
+        if not isinstance(anchor, Tag):
+            return None
+        candidate = urljoin(current_url, str(anchor["href"]))
+        current = urlparse(current_url)
+        next_page = urlparse(candidate)
+        if (
+            next_page.scheme != "https"
+            or next_page.netloc not in {"www.avito.ru", "avito.ru"}
+            or next_page.path != current.path
+            or candidate == current_url
+        ):
+            return None
+        return candidate
 
     @staticmethod
     def _region_path(region: SearchRegion) -> str:

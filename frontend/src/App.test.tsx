@@ -5,7 +5,7 @@ import App from "./App";
 
 const result = {
   source_vehicle: {
-    brand: "Ford", model: "Fiesta", year_mode: "exact", year: 2016,
+    brand: "Example Brand", model: "Example Model", year_mode: "exact", year: 2016,
     year_from: null, year_to: null, body_type: "any", transmission: "any",
     region: "moscow_and_oblast", price_mode: "exact", price: 700000,
     price_from: null, price_to: null, modification: null, generation: null,
@@ -26,11 +26,11 @@ const result = {
   source_listings: {
     listings: [{
       listing: {
-        source: "auto.ru", external_id: "1", brand: "Ford", model: "Fiesta",
+        source: "auto.ru", external_id: "1", brand: "Example Brand", model: "Example Model",
         modification: null, generation: null, fuel_type: null,
         engine_displacement: null, power_hp: null, engine_code: null, drivetrain: null,
         year: 2016, body_type: "hatchback", transmission: "automatic", price: 710000,
-        url: "https://auto.ru/cars/used/sale/ford/fiesta/1-x/", location: "Москва",
+        url: "https://auto.ru/cars/used/sale/example/1-x/", location: "Москва",
         city: "Москва", region: "Москва", checked_at: "2026-01-01T00:00:00Z", segment: "passenger",
       },
       price_difference: 10000, price_difference_percent: 1.43,
@@ -56,12 +56,12 @@ let deferredKnowledge: Promise<unknown> | null;
 function installFetch(searchResult: unknown = result) {
   return vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
     const url = String(input);
-    if (url.includes("/catalog/brands")) return response(["Ford", "BMW"]) as never;
+    if (url.includes("/catalog/brands")) return response(["Example Brand", "Second Brand"]) as never;
     if (url.includes("/catalog/regions")) return response({ regions: [
       { value: "moscow_and_oblast", label: "Москва и Московская область" },
       { value: "tatarstan", label: "Республика Татарстан" },
     ] }) as never;
-    if (url.includes("/catalog/models")) return response(["Fiesta", "Focus"]) as never;
+    if (url.includes("/catalog/models")) return response(["Example Model", "Second Model"]) as never;
     if (url.includes("/catalog/generation-state")) return response(generationResponse) as never;
     if (url.includes("/catalog/engines")) return response([
       { id: "engine:one", label: "1.6 л · бензин · 105 л.с.", name: "engine" },
@@ -95,7 +95,11 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Марка"), { target: { value: result.source_vehicle.brand } });
     fireEvent.change(screen.getByLabelText("Модель"), { target: { value: result.source_vehicle.model } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: String(result.source_vehicle.year) } });
-    fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700.000" } });
+    const exactPrice = screen.getByLabelText("Цена") as HTMLInputElement;
+    exactPrice.focus();
+    fireEvent.change(exactPrice, { target: { value: "700000" } });
+    expect(exactPrice).toHaveFocus();
+    expect(exactPrice).toHaveValue("700.000");
     fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
     expect(await screen.findByText("1.000.000 ₽")).toBeInTheDocument();
     expect(screen.getByText("900.000 ₽ — 1.100.000 ₽")).toBeInTheDocument();
@@ -116,19 +120,42 @@ describe("CarAnalyzer form", () => {
     fireEvent.change(screen.getByLabelText("Модель"), { target: { value: result.source_vehicle.model } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: String(result.source_vehicle.year) } });
     fireEvent.click(screen.getAllByRole("button", { name: "Диапазон" })[1]);
-    fireEvent.change(screen.getByLabelText("Цена от"), { target: { value: "1.000.000" } });
-    fireEvent.change(screen.getByLabelText("Цена до"), { target: { value: "2 000 000" } });
+    const priceFrom = screen.getByLabelText("Цена от") as HTMLInputElement;
+    const priceTo = screen.getByLabelText("Цена до") as HTMLInputElement;
+    priceFrom.focus();
+    fireEvent.change(priceFrom, { target: { value: "1000000" } });
+    expect(priceFrom).toHaveValue("1.000.000");
+    expect(priceFrom).toHaveFocus();
+    priceTo.focus();
+    fireEvent.change(priceTo, { target: { value: "2 000 000" } });
+    expect(priceTo).toHaveValue("2.000.000");
+    expect(priceTo).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
     await screen.findByText("Рынок исходной модели");
     expect(screen.getByText(/1\.000\.000 ₽ — 2\.000\.000 ₽/)).toBeInTheDocument();
     const payload = JSON.parse(String(vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes("/api/search"))?.[1]?.body));
     expect(payload).toMatchObject({ price_mode: "range", price: null, price_from: 1000000, price_to: 2000000 });
   });
+  it("keeps zero invalid for exact and range prices", () => {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
+    fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    expect(screen.getByText("Укажите корректную цену или диапазон цен.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Диапазон" })[1]);
+    fireEvent.change(screen.getByLabelText("Цена от"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("Цена до"), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/api/search"))).toHaveLength(0);
+  });
   it("shows an explicit no-generation status without selecting an option", async () => {
     generationResponse = { status: "source_has_no_generation_data", generations: [] };
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     await waitFor(() => expect(screen.getByText("Источник подтвердил отсутствие данных о поколениях")).toBeInTheDocument());
     expect(screen.getByLabelText("Поколение")).toBeDisabled();
@@ -139,8 +166,8 @@ describe("CarAnalyzer form", () => {
       { id: "g1", label: "6 поколение", name: "6 поколение" },
     ] };
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     await waitFor(() => expect(screen.getByText("Формат данных о поколениях пока не распознан")).toBeInTheDocument());
     expect(screen.getByLabelText("Поколение")).toHaveValue("");
@@ -150,10 +177,10 @@ describe("CarAnalyzer form", () => {
     render(<App />);
     const [brand, model] = screen.getAllByRole("combobox");
     expect(model).toBeDisabled();
-    fireEvent.change(brand, { target: { value: "Ford" } });
+    fireEvent.change(brand, { target: { value: "Example Brand" } });
     expect(model).not.toBeDisabled();
     fireEvent.focus(model);
-    await waitFor(() => expect(screen.getByRole("option", { name: "Fiesta" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("option", { name: "Example Model" })).toBeInTheDocument());
     expect(screen.getByRole("option", { name: "Любой кузов" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Любая" })).toBeInTheDocument();
     expect(screen.getByLabelText("Кузов")).toHaveValue("any");
@@ -166,8 +193,8 @@ describe("CarAnalyzer form", () => {
   it("resets generation when model/year dependencies change and hides engine input", async () => {
     render(<App />);
     const [brand, model] = screen.getAllByRole("combobox");
-    fireEvent.change(brand, { target: { value: "Ford" } });
-    fireEvent.change(model, { target: { value: "Fiesta" } });
+    fireEvent.change(brand, { target: { value: "Example Brand" } });
+    fireEvent.change(model, { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     await waitFor(() => expect(screen.getByText("Поколения загружены")).toBeInTheDocument());
     const generation = screen.getByLabelText("Поколение");
@@ -175,15 +202,15 @@ describe("CarAnalyzer form", () => {
     await waitFor(() => expect(screen.getByRole("option", { name: "6 поколение" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("option", { name: "6 поколение" }));
     expect(screen.queryByLabelText("Двигатель")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Focus" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Second Model" } });
     expect(screen.getByLabelText("Поколение")).toHaveValue("");
   });
 
   it("submits exact/range payload with region, ANY filters, and reference price", async () => {
     const fetchMock = vi.mocked(fetch);
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     fireEvent.focus(screen.getByLabelText("Регион поиска"));
     await waitFor(() => expect(screen.getByRole("option", { name: "Республика Татарстан" })).toBeInTheDocument());
@@ -206,8 +233,8 @@ describe("CarAnalyzer form", () => {
 
   it("renders independent source states and safe marketplace links", async () => {
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
     fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
@@ -224,8 +251,8 @@ describe("CarAnalyzer form", () => {
     let finishKnowledge: (value: unknown) => void = () => {};
     deferredKnowledge = new Promise((resolve) => { finishKnowledge = resolve; });
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Ford" } });
-    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Fiesta" } });
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
     fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
     fireEvent.change(screen.getByLabelText("Кузов"), { target: { value: "any" } });
     fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
@@ -244,5 +271,18 @@ describe("CarAnalyzer form", () => {
       },
     }));
     await waitFor(() => expect(screen.getByText("Проверка цепи")).toBeInTheDocument());
+  });
+
+  it("does not start technical discovery or Gemini after a normal market search", async () => {
+    const fetchMock = vi.mocked(fetch);
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Марка"), { target: { value: "Example Brand" } });
+    fireEvent.change(screen.getByLabelText("Модель"), { target: { value: "Example Model" } });
+    fireEvent.change(screen.getByLabelText("Год"), { target: { value: "2016" } });
+    fireEvent.change(screen.getByLabelText("Цена"), { target: { value: "700000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти конкурентов" }));
+    expect(await screen.findByText("Рынок исходной модели")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Запустить технический анализ" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => /\/api\/knowledge\/(build|rebuild)/.test(String(url)))).toBe(false);
   });
 });

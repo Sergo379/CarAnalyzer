@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TechnicalKnowledge } from "./TechnicalKnowledge";
@@ -54,6 +54,7 @@ describe("TechnicalKnowledge progress", () => {
       return json({ status: "building", phase: "calling_gemini" }) as never;
     });
     render(<TechnicalKnowledge selection={{ ...selection, generation_id: "" }} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Запустить технический анализ" }));
     await screen.findByText("Gemini анализирует технические данные");
     const build = mock.mock.calls.find(([url]) => String(url).endsWith("/build"));
     expect(JSON.parse(String(build?.[1]?.body))).toMatchObject({ generation_id: null, engine_id: null });
@@ -68,6 +69,8 @@ describe("TechnicalKnowledge progress", () => {
         provider_timeout_seconds: 120, build_elapsed_seconds: 50 }) as never;
     });
     render(<TechnicalKnowledge selection={selection} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Запустить технический анализ" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText("Gemini анализирует технические данные")).toBeInTheDocument();
     expect(screen.getByText(/Попытка 1 из 3 · прошло 42 сек · таймаут 120 сек/)).toBeInTheDocument();
@@ -97,6 +100,8 @@ describe("TechnicalKnowledge progress", () => {
       return Promise.reject(new Error("sources unavailable"));
     });
     render(<TechnicalKnowledge selection={selection} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Запустить технический анализ" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
     expect(screen.getByText(/Повторная попытка через 4 сек · попытка 2 из 3/)).toBeInTheDocument();
@@ -134,7 +139,7 @@ describe("TechnicalKnowledge progress", () => {
   });
 
   it("renders a cached complete profile immediately with every populated section", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.includes("/profile")) {
         return json({
@@ -161,6 +166,33 @@ describe("TechnicalKnowledge progress", () => {
     expect(screen.getByText("Дорогая неисправность")).toBeInTheDocument();
     expect(screen.getByText("Итоговая оценка риска")).toBeInTheDocument();
     expect(screen.getByText(/2 независимых источника.*Средняя подтверждённость/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/build") || String(url).includes("/rebuild"))).toBe(false);
+  });
+
+  it("shows a manual action without starting discovery for an uncached scope", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      if (String(input).includes("/profile")) return json({ status: "not_found" }) as never;
+      return json({ status: "building" }) as never;
+    });
+    render(<TechnicalKnowledge selection={selection} />);
+    expect(await screen.findByRole("button", { name: "Запустить технический анализ" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([expect.stringContaining("/profile")]);
+    fireEvent.click(screen.getByRole("button", { name: "Запустить технический анализ" }));
+    await screen.findByText("Собираем техническую информацию…");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/build"))).toHaveLength(1);
+  });
+
+  it("keeps the manual action available after a provider network failure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      if (String(input).includes("/profile")) return json({ status: "not_found" }) as never;
+      return Promise.reject(new TypeError("Failed to fetch")) as never;
+    });
+    render(<TechnicalKnowledge selection={selection} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Запустить технический анализ" }));
+    expect(await screen.findByText(/Рыночные результаты не затронуты; попробуйте позже/)).toBeInTheDocument();
+    expect(screen.getByText(/нет связи с сервером/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Запустить технический анализ" })).toBeEnabled();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/build"))).toHaveLength(1);
   });
 
   it("shows an active user-friendly build phase", async () => {
@@ -178,6 +210,7 @@ describe("TechnicalKnowledge progress", () => {
       return new Promise(() => {}) as never;
     });
     render(<TechnicalKnowledge selection={selection} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Запустить технический анализ" }));
     expect(await screen.findByText("Собираем техническую информацию…")).toBeInTheDocument();
     expect(screen.getByText(/загрузка материалов/)).toBeInTheDocument();
     expect(screen.queryByText(/найдено источников: 3/)).not.toBeInTheDocument();
@@ -224,6 +257,8 @@ describe("TechnicalKnowledge progress", () => {
     });
     render(<TechnicalKnowledge selection={selection} />);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Запустить технический анализ" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText("Проверить компонент")).toBeInTheDocument();
@@ -233,7 +268,7 @@ describe("TechnicalKnowledge progress", () => {
     expect(buildCalls).toHaveLength(1);
   });
 
-  it("shows a legacy cached profile immediately while upgrading from the local corpus", async () => {
+  it("shows a legacy cached profile immediately and upgrades only on request", async () => {
     vi.useFakeTimers();
     let profileCalls = 0;
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
@@ -255,6 +290,9 @@ describe("TechnicalKnowledge progress", () => {
     render(<TechnicalKnowledge selection={selection} />);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText("Старое описание")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/rebuild"))).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Повторить технический анализ" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText("Собираем техническую информацию…")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
     expect(screen.getByText("Проверка при выкупе")).toBeInTheDocument();
@@ -342,7 +380,7 @@ describe("TechnicalKnowledge progress", () => {
     expect(await screen.findByText(/Недостаточно подтверждений/)).toBeInTheDocument();
   });
 
-  it("shows cached fallback while starting an exact-scope build", async () => {
+  it("shows cached fallback while waiting for an explicit exact-scope build", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = String(input);
       if (url.includes("/profile")) {
@@ -380,6 +418,9 @@ describe("TechnicalKnowledge progress", () => {
     });
     render(<TechnicalKnowledge selection={selection} />);
     expect(await screen.findByText("Общая проверка")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/build"))).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Запустить технический анализ" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText("Собираем техническую информацию…")).toBeInTheDocument();
     const buildCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/build"));
     expect(buildCalls).toHaveLength(1);
@@ -435,7 +476,7 @@ describe("TechnicalKnowledge progress", () => {
     });
     render(<TechnicalKnowledge selection={selection} />);
     expect(await screen.findByText(/Gemini временно недоступен/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Повторить сбор знаний" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Повторить технический анализ" })).toBeInTheDocument();
     expect(screen.queryByText("Базовая проверка при выкупе")).not.toBeInTheDocument();
   });
 

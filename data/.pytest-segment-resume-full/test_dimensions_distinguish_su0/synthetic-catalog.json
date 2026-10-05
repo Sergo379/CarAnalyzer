@@ -1,1 +1,0 @@
-{"brands": [{"id": "brand-1", "name": "Example Brand", "models": [{"id": "model-1", "name": "Example Model", "classification": {}, "generations": [{"id": "generation-1", "name": "Generation 1", "classification": {"category": "suv", "dimensions": {"length_mm": 4380, "wheelbase_mm": 2600}}, "body_types": ["crossover"], "source_refs": []}]}]}]}

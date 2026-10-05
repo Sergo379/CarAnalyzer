@@ -100,12 +100,29 @@ def _size_for(value: float, boundaries: tuple[int, ...]) -> str:
 def classify_metadata(metadata: dict, body: BodyType | None) -> SegmentClassification:
     """Explicit source metadata wins; dimensions require two agreeing signals."""
     family = _family(body, metadata)
+    carsbase_class = str(metadata.get("carsbase_class") or "").upper().strip()
+    if carsbase_class == "J" and family == "unknown":
+        family = "suv"  # CarsBase J has no trustworthy SUV size subclass.
+    elif carsbase_class == "S" and family in {"unknown", "passenger"}:
+        family = "sport"
+    elif carsbase_class == "M" and family == "unknown":
+        family = "mpv"
+    elif carsbase_class in {"A", "B", "C", "D", "E", "F"} and family == "unknown":
+        family = "passenger"
     position = str(
         metadata.get("market_position") or metadata.get("positioning") or "unknown"
     ).casefold()
     if position not in _POSITIONS:
         position = "unknown"
-    raw = str(metadata.get("segment_code") or metadata.get("segment") or "").upper().strip()
+    raw = (
+        str(
+            metadata.get("segment_code")
+            or metadata.get("segment")
+            or (carsbase_class if carsbase_class != "J" else "")
+        )
+        .upper()
+        .strip()
+    )
     raw = re.sub(r"\s+", "", raw).replace("J_", "J-")
     if raw in _CODES:
         source_family = (
@@ -318,8 +335,12 @@ class SegmentClassifier:
             if len(families) == 1 and possible_bodies:
                 body = sorted(possible_bodies, key=str)[0]
         model_meta = dict(model_entry.get("classification") or {})
+        if not model_meta.get("segment_code") and not model_meta.get("segment"):
+            model_meta["carsbase_class"] = (model_entry.get("carsbase_metadata") or {}).get("class")
         generation_meta = dict(generation.get("classification") or {}) if generation else {}
         metadata = {**model_meta, **generation_meta}
+        if generation_meta.get("segment_code") or generation_meta.get("segment"):
+            metadata.pop("carsbase_class", None)
         if generation:
             metadata.update(
                 {

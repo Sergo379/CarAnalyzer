@@ -243,8 +243,12 @@ def test_direct_uses_class_and_price_unknown_falls_back():
     assert engine.classify_price(1_000_000, 1_070_001).value == "expensive"
 
 
-def test_provider_failure_keeps_marketplace_search_usable(tmp_path):
+def test_marketplace_search_does_not_invoke_segment_llm_fallback(tmp_path):
+    provider_calls = 0
+
     async def failing(metadata, body):
+        nonlocal provider_calls
+        provider_calls += 1
         raise RuntimeError("provider unavailable")
 
     class SyntheticScraper(BaseScraper):
@@ -279,6 +283,7 @@ def test_provider_failure_keeps_marketplace_search_usable(tmp_path):
             )
         )
     )
-    assert result.pipeline_diagnostics["segment_ai_fallback_called"] is True
+    assert result.pipeline_diagnostics["segment_ai_fallback_called"] is False
+    assert provider_calls == 0
     assert result.source_vehicle.segment_code == "UNKNOWN"
     assert len(result.direct.listings) == 1

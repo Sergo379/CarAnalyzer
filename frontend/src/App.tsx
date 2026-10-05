@@ -266,8 +266,8 @@ export default function App() {
     if (!form.model.trim()) return setError("Выберите или напишите модель автомобиля.");
     if (!yearReady) return setError("Укажите корректный год или диапазон годов.");
     const priceReady = form.price_mode === "exact"
-      ? form.price !== ""
-      : form.price_from !== "" && form.price_to !== "" && form.price_from <= form.price_to;
+      ? form.price !== "" && form.price > 0
+      : form.price_from !== "" && form.price_to !== "" && form.price_from > 0 && form.price_to > 0 && form.price_from <= form.price_to;
     if (!priceReady) return setError("Укажите корректную цену или диапазон цен.");
     setLoading(true);
     try {
